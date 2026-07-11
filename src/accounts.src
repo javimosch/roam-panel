@@ -1,0 +1,158 @@
+// accounts.src — M2 multi-tenancy: accounts, per-account worker tokens (hashed at rest),
+// passwordless magic-link email login, and Telegram approval notifications. Native-only
+// (composed into the server, not the wasm client). Reuses server.src config helpers
+// (sign_secret/panel_url/resend_*/hub_token/env_or/onetap_url/has_column) + view.src
+// helpers (unq/jget/jstr/esc/first_n).
+
+// ---- schema + migration (called from serve startup) ----
+func has_column(db, tbl, col) (found) {
+    found = 0
+    info := sqlite_query(db, "PRAGMA table_info(" + tbl + ")")
+    if index(info, "\"name\":\"" + col + "\"") >= 0 { found = 1 }
+}
+func accounts_schema(db) {
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS accounts(id TEXT PRIMARY KEY, email TEXT UNIQUE, telegram_chat_id TEXT DEFAULT '', tg_code TEXT DEFAULT '', created INTEGER)", []string{})
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS tokens(token TEXT PRIMARY KEY, account_id TEXT, created INTEGER)", []string{})
+    if has_column(db, "agents", "account_id") == 0 {
+        sqlite_exec(db, "ALTER TABLE agents ADD COLUMN account_id TEXT DEFAULT ''", []string{})
+    }
+}
+func tok_hash(t) (h) { h = sha256(t) }
+func newid() (s) { s = to_hex(rand_bytes(16)) }
+
+// seed a "default" account from env ROAM_HUB_TOKEN so existing single-user deploys keep
+// working (that token now belongs to the default account; pre-M2 agents are adopted into it).
+func seed_default(db) {
+    ht := hub_token()
+    if ht == "" { return }
+    have := sqlite_query(db, "SELECT account_id FROM tokens WHERE token = ?", []string{tok_hash(ht)})
+    if have != "[]" { return }
+    sqlite_exec(db, "INSERT OR IGNORE INTO accounts(id,email,telegram_chat_id,tg_code,created) VALUES('default',?,?,?,?)", []string{approve_email(), env_or("TELEGRAM_CHAT_ID", ""), newid(), str(now())})
+    sqlite_exec(db, "INSERT OR IGNORE INTO tokens(token,account_id,created) VALUES(?,'default',?)", []string{tok_hash(ht), str(now())})
+    sqlite_exec(db, "UPDATE agents SET account_id='default' WHERE account_id='' OR account_id IS NULL", []string{})
+}
+
+// bearer worker token -> account_id
+func bearer_account(db, req) (aid, ok) {
+    aid = ""  ok = 0
+    h := header(req, "authorization")
+    if !has_prefix(h, "Bearer ") { return aid, ok }
+    tok := trim(substr(h, 7, len(h)))
+    if tok == "" { return aid, ok }
+    rows := sqlite_query(db, "SELECT account_id FROM tokens WHERE token = ?", []string{tok_hash(tok)})
+    v, err := json_get(rows, "[0].account_id")
+    if err != "" { return aid, ok }
+    aid = unq(v)
+    if aid != "" { ok = 1 }
+}
+func account_exists(db, email) (yes) {
+    rows := sqlite_query(db, "SELECT id FROM accounts WHERE email = ?", []string{email})
+    yes = 0
+    if rows != "[]" { yes = 1 }
+}
+func account_for_email(db, email) (aid) {
+    rows := sqlite_query(db, "SELECT id FROM accounts WHERE email = ?", []string{email})
+    v, err := json_get(rows, "[0].id")
+    if err == "" { aid = unq(v)  return aid }
+    aid = newid()
+    sqlite_exec(db, "INSERT INTO accounts(id,email,telegram_chat_id,tg_code,created) VALUES(?,?,'',?,?)", []string{aid, email, newid(), str(now())})
+}
+func mint_token(db, aid) (tok) {
+    tok = newid() + newid()
+    sqlite_exec(db, "DELETE FROM tokens WHERE account_id = ?", []string{aid})
+    sqlite_exec(db, "INSERT INTO tokens(token,account_id,created) VALUES(?,?,?)", []string{tok_hash(tok), aid, str(now())})
+}
+func account_email(db, aid) (e) { rows := sqlite_query(db, "SELECT email FROM accounts WHERE id = ?", []string{aid})  e = unq(jget(rows, "[0].email")) }
+func account_tg(db, aid) (c)    { rows := sqlite_query(db, "SELECT telegram_chat_id FROM accounts WHERE id = ?", []string{aid})  c = unq(jget(rows, "[0].telegram_chat_id")) }
+func account_tgcode(db, aid) (c){ rows := sqlite_query(db, "SELECT tg_code FROM accounts WHERE id = ?", []string{aid})  c = unq(jget(rows, "[0].tg_code")) }
+
+// ---- passwordless magic-link login ----
+func magic_sign(email, exp) (t) { t = hmac_sha256(sign_secret(), "login|" + email + "|" + exp) }
+func magic_url(email) (u) {
+    exp := str(now() + 900)
+    u = panel_url() + "/auth?e=" + url_encode(email) + "&exp=" + exp + "&t=" + magic_sign(email, exp)
+}
+func magic_verify(email, exp, t) (ok) {
+    ok = 0
+    if sign_secret() == "" || t == "" || email == "" { return ok }
+    if magic_sign(email, exp) != t { return ok }
+    if now() >= parse_int(exp) { return ok }
+    ok = 1
+}
+func send_magic_email(email) {
+    key := resend_key()
+    if key == "" { return }
+    url := magic_url(email)
+    html := "<div style=\"font-family:system-ui,sans-serif;max-width:480px\"><p>Sign in to <b>roam panel</b>:</p><p><a href=\"" + url + "\" style=\"display:inline-block;background:#f59e0b;color:#111;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600\">Sign in</a></p><p style=\"color:#888;font-size:13px\">This link expires in 15 minutes. If you didn't request it, ignore this email.</p></div>"
+    body := "{\"from\":" + json(resend_from()) + ",\"to\":[" + json(email) + "],\"subject\":\"Sign in to roam panel\",\"html\":" + json(html) + "}"
+    st, _, _ := http_request("POST", "https://api.resend.com/emails", []string{"Authorization: Bearer " + key, "Content-Type: application/json"}, body)
+    if st != 200 { return }
+}
+
+// ---- Telegram ----
+func tg_bot_token() (t) { t = env_or("TELEGRAM_BOT_TOKEN", "") }
+func tg_bot_name() (n) { n = env_or("TELEGRAM_BOT_NAME", "") }
+func tg_connect_url(code) (u) {
+    u = ""
+    if tg_bot_name() != "" && code != "" { u = "https://t.me/" + tg_bot_name() + "?start=" + code }
+}
+func tg_send(chat, text, approve_url, deny_url) {
+    tk := tg_bot_token()
+    if tk == "" || chat == "" { return }
+    body := "{\"chat_id\":" + json(chat) + ",\"text\":" + json(text) + ",\"parse_mode\":\"HTML\""
+    if approve_url != "" {
+        kb := "{\"inline_keyboard\":[[{\"text\":\"\\u2705 Approve\",\"url\":" + json(approve_url) + "},{\"text\":\"\\u26d4 Deny\",\"url\":" + json(deny_url) + "}]]}"
+        body = body + ",\"reply_markup\":" + kb
+    }
+    body = body + "}"
+    st, _, _ := http_request("POST", "https://api.telegram.org/bot" + tk + "/sendMessage", []string{"Content-Type: application/json"}, body)
+    if st != 200 { return }
+}
+// background long-poller: a `/start <tg_code>` message links that chat to the account.
+func tg_poller() {
+    if tg_bot_token() == "" { return }
+    offset := 0
+    for 1 == 1 {
+        st, resp, _ := http_request("GET", "https://api.telegram.org/bot" + tg_bot_token() + "/getUpdates?timeout=25&offset=" + str(offset), []string{}, "")
+        if st != 200 { sleep(5000) } else {
+            i := 0
+            for i < 100 {
+                uid, e := json_get(resp, ".result[" + str(i) + "].update_id")
+                if e != "" { i = 100 } else {
+                    offset = parse_int(uid) + 1
+                    text := unq(jget(resp, ".result[" + str(i) + "].message.text"))
+                    chat := unq(jget(resp, ".result[" + str(i) + "].message.chat.id"))
+                    if has_prefix(text, "/start ") && chat != "" {
+                        code := trim(substr(text, 7, len(text)))
+                        db := dbopen()
+                        sqlite_exec(db, "UPDATE accounts SET telegram_chat_id = ? WHERE tg_code = ?", []string{chat, code})
+                        found := sqlite_query(db, "SELECT id FROM accounts WHERE tg_code = ?", []string{code})
+                        sqlite_close(db)
+                        if found != "[]" { tg_send(chat, "✅ Connected to <b>roam panel</b> — approval requests will arrive here.", "", "") }
+                    }
+                    i = i + 1
+                }
+            }
+        }
+    }
+}
+
+// notify_park (account-aware): email the account owner + Telegram them, with one-tap links.
+func notify_park(jobid, host, cmd, aid) {
+    db := dbopen()
+    email := account_email(db, aid)
+    chat := account_tg(db, aid)
+    sqlite_close(db)
+    approve := onetap_url(jobid, "approve")
+    deny := onetap_url(jobid, "deny")
+    if resend_key() != "" && email != "" {
+        subj := "roam: agent " + host + " wants to run: " + first_n(cmd, 80)
+        html := "<div style=\"font-family:system-ui,sans-serif;max-width:520px\"><p>Agent <b>" + esc(host) + "</b> (<code>" + esc(jobid) + "</code>) parked on a destructive command:</p><pre style=\"background:#111;color:#eee;padding:12px;border-radius:8px;overflow:auto\">" + esc(cmd) + "</pre><p><a href=\"" + approve + "\" style=\"display:inline-block;background:#16a34a;color:#fff;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:600\">Approve</a>&nbsp;&nbsp;<a href=\"" + deny + "\" style=\"display:inline-block;background:#dc2626;color:#fff;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:600\">Deny</a></p><p style=\"color:#888;font-size:13px\">Links expire in 30 min. Or open the <a href=\"" + panel_url() + "\">panel</a>.</p></div>"
+        body := "{\"from\":" + json(resend_from()) + ",\"to\":[" + json(email) + "],\"subject\":" + json(subj) + ",\"html\":" + json(html) + "}"
+        st, _, _ := http_request("POST", "https://api.resend.com/emails", []string{"Authorization: Bearer " + resend_key(), "Content-Type: application/json"}, body)
+        if st != 200 { return }
+    }
+    if chat != "" {
+        tg_send(chat, "\U0001F535 <b>" + esc(host) + "</b> wants to run:\n<code>" + esc(first_n(cmd, 120)) + "</code>", approve, deny)
+    }
+}

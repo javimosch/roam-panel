@@ -49,39 +49,88 @@ func form(req, name) (v) {
 }
 
 // ---------- worker auth (single shared bearer token for M0) ----------
-func worker_authed(req) (ok) {
-    ok = 0
-    want := hub_token()
-    if want == "" { return ok }                 // no token configured -> reject everything
-    h := header(req, "authorization")
-    if !has_prefix(h, "Bearer ") { return ok }
-    tok := trim(substr(h, 7, len(h)))
-    if sha256(tok) == sha256(want) { ok = 1 }    // compare hashes, not raw
-}
 
 // ---- panel auth: a session cookie guarding the browse UI + /api/decide. The worker
 // endpoints (bearer) and the one-tap /a links (HMAC) stay public with their own auth,
 // so basic-auth on the whole domain (which would break both) is NOT needed.
 func panel_pass() (p) { p = env_or("PANEL_PASSWORD", "") }
-func panel_authed(req) (ok) {
-    ok = 0
-    if panel_pass() == "" { ok = 1  return ok }   // no password set -> open (dev only)
-    v, o := get_session(req, sign_secret(), "rp")
-    if o == 1 && v == "ok" { ok = 1 }
+func session_account(req) (aid, ok) {
+    aid = ""  ok = 0
+    v, o := get_session(req, sign_secret(), "acct")
+    if o == 1 && v != "" { aid = v  ok = 1 }
 }
-func login_page(errmsg) (h) {
+func login_page(errmsg, sent) (h) {
     h = "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>roam panel — sign in</title>" + styles() + "</head><body>"
-    h = h + "<h1>&#128760; roam panel</h1>"
+    h = h + "<header><h1>&#128752; roam panel</h1></header><div class=sub>approve your remote agents from your phone</div>"
+    if sent == 1 {
+        h = h + "<div class=ag><div class=ask>&#9993; check your email</div><p style=\"color:var(--mut);font-size:13px;margin:6px 0 0\">We sent a sign-in link — it expires in 15 minutes.</p></div></body></html>"
+        return h
+    }
     if errmsg != "" { h = h + "<div class=ag style=\"border-color:#b91c1c\"><div class=sub>" + esc(errmsg) + "</div></div>" }
-    h = h + "<form method=post action=/login class=ag><div class=row><input type=password name=password placeholder=password autofocus><button class=ap>Sign in</button></div></form></body></html>"
+    h = h + "<form method=post action=/login class=ag><div class=ask>Sign in with your email</div><div class=ctl><input type=email name=email placeholder=\"you@example.com\" autofocus><button class=ap>Email me a link</button></div></form>"
+    if panel_pass() != "" {
+        h = h + "<form method=post action=/login class=ag><div class=ask>or admin password</div><div class=ctl><input type=password name=password placeholder=password><button class=ghost>Sign in</button></div></form>"
+    }
+    h = h + "</body></html>"
 }
 func h_login(req) (res) {
-    if panel_pass() != "" && form(req, "password") == panel_pass() {
-        res = redirect("/")
-        res = set_session(res, sign_secret(), "rp", "ok")
+    pw := form(req, "password")
+    if pw != "" {
+        if panel_pass() != "" && pw == panel_pass() {
+            res = redirect("/")
+            res = set_session(res, sign_secret(), "acct", "default")
+            return res
+        }
+        return response("200 OK", "text/html; charset=utf-8", login_page("wrong password", 0))
+    }
+    email := trim(form(req, "email"))
+    if email == "" || index(email, "@") < 1 { return response("200 OK", "text/html; charset=utf-8", login_page("enter a valid email", 0)) }
+    go send_magic_email(email)
+    res = response("200 OK", "text/html; charset=utf-8", login_page("", 1))
+}
+func welcome_page(email, tok) (h) {
+    h = "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>roam panel</title>" + styles() + "</head><body>"
+    h = h + "<header><h1>&#128752; roam panel</h1></header><div class=sub>signed in as " + esc(email) + "</div>"
+    h = h + "<div class=\"ag park\"><div class=ask>&#9888;&#65039; your worker token &mdash; save it, shown once</div><div class=cmd>" + esc(tok) + "</div>"
+    h = h + "<p style=\"color:var(--mut);font-size:12.5px;margin:10px 0 0\">Pass it as <code>--hub-token</code> when you dispatch agents. Regenerate any time from Account &amp; notifications.</p></div>"
+    h = h + "<p><a href=/>Open the panel &rarr;</a></p></body></html>"
+}
+func h_auth(req) (res) {
+    email := query(req, "e")
+    if magic_verify(email, query(req, "exp"), query(req, "t")) == 0 { return response("403 Forbidden", "text/html; charset=utf-8", login_page("invalid or expired sign-in link", 0)) }
+    db := dbopen()
+    isnew := 0
+    if account_exists(db, email) == 0 { isnew = 1 }
+    aid := account_for_email(db, email)
+    tok := ""
+    if isnew == 1 { tok = mint_token(db, aid) }
+    sqlite_close(db)
+    if isnew == 1 {
+        res = response("200 OK", "text/html; charset=utf-8", welcome_page(email, tok))
+        res = set_session(res, sign_secret(), "acct", aid)
         return res
     }
-    res = response("200 OK", "text/html; charset=utf-8", login_page("wrong password"))
+    res = redirect("/")
+    res = set_session(res, sign_secret(), "acct", aid)
+}
+func h_logout(req) (res) { res = redirect("/")  res = clear_cookie(res, "acct") }
+func h_regen(req) (res) {
+    aid, ok := session_account(req)
+    if ok == 0 { return redirect("/") }
+    db := dbopen()
+    tok := mint_token(db, aid)
+    email := account_email(db, aid)
+    sqlite_close(db)
+    res = response("200 OK", "text/html; charset=utf-8", welcome_page(email, tok))
+}
+func h_tgoff(req) (res) {
+    aid, ok := session_account(req)
+    if ok == 1 {
+        db := dbopen()
+        sqlite_exec(db, "UPDATE accounts SET telegram_chat_id='' WHERE id = ?", []string{aid})
+        sqlite_close(db)
+    }
+    res = redirect("/")
 }
 
 // ---------- one-tap link signing (HMAC-SHA256 over job|decision|exp) ----------
@@ -104,10 +153,10 @@ func agent_pending(db, jobid) (p) {
     rows := sqlite_query(db, "SELECT pending FROM agents WHERE id = ?", []string{jobid})
     p = unq(jget(rows, "[0].pending"))
 }
-func upsert_agent(db, id, host, goal, provider, status, pending, iters, toks) {
+func upsert_agent(db, id, aid, host, goal, provider, status, pending, iters, toks) {
     n := str(now())
-    sqlite_exec(db, "INSERT INTO agents (id,host,goal,provider,status,pending,iters,tokens,last_seen,created) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET host=excluded.host, goal=excluded.goal, provider=excluded.provider, status=excluded.status, pending=excluded.pending, iters=excluded.iters, tokens=excluded.tokens, last_seen=excluded.last_seen",
-        []string{id, host, goal, provider, status, pending, str(iters), str(toks), n, n})
+    sqlite_exec(db, "INSERT INTO agents (id,account_id,host,goal,provider,status,pending,iters,tokens,last_seen,created) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id, host=excluded.host, goal=excluded.goal, provider=excluded.provider, status=excluded.status, pending=excluded.pending, iters=excluded.iters, tokens=excluded.tokens, last_seen=excluded.last_seen",
+        []string{id, aid, host, goal, provider, status, pending, str(iters), str(toks), n, n})
 }
 func append_events(db, jobid, body) {
     i := 0
@@ -126,48 +175,31 @@ func insert_decision(db, jobid, decision, arg) {
     sqlite_exec(db, "INSERT INTO decisions (agent_id,decision,arg,ts,consumed) VALUES (?,?,?,?,0)", []string{jobid, decision, arg, str(now())})
 }
 
-// ---------- Resend email on park (runs off the request path via `go`) ----------
-func notify_park(jobid, host, cmd) {
-    key := resend_key()
-    to := approve_email()
-    if key == "" { return }
-    if to == "" { return }
-    approve := onetap_url(jobid, "approve")
-    deny := onetap_url(jobid, "deny")
-    subj := "roam: agent " + host + " wants to run: " + first_n(cmd, 80)
-    html := "<div style=\"font-family:system-ui,sans-serif;max-width:520px\">"
-    html = html + "<p>Agent <b>" + esc(host) + "</b> (<code>" + esc(jobid) + "</code>) parked on a destructive command:</p>"
-    html = html + "<pre style=\"background:#111;color:#eee;padding:12px;border-radius:8px;overflow:auto\">" + esc(cmd) + "</pre>"
-    html = html + "<p><a href=\"" + approve + "\" style=\"display:inline-block;background:#16a34a;color:#fff;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:600\">Approve</a>"
-    html = html + "&nbsp;&nbsp;<a href=\"" + deny + "\" style=\"display:inline-block;background:#dc2626;color:#fff;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:600\">Deny</a></p>"
-    html = html + "<p style=\"color:#888;font-size:13px\">Links expire in 30 min. Or open the <a href=\"" + panel_url() + "\">panel</a>.</p></div>"
-    body := "{\"from\":" + json(resend_from()) + ",\"to\":[" + json(to) + "],\"subject\":" + json(subj) + ",\"html\":" + json(html) + "}"
-    hdrs := []string{"Authorization: Bearer " + key, "Content-Type: application/json"}
-    st, _, _ := http_request("POST", "https://api.resend.com/emails", hdrs, body)
-    if st != 200 { return }
-}
-
 // ---------- worker-facing endpoints ----------
 func h_report(req) (res) {
-    if worker_authed(req) == 0 { return err_json("401 Unauthorized", "bad or missing bearer token") }
+    db := dbopen()
+    aid, ok := bearer_account(db, req)
+    if ok == 0 { sqlite_close(db)  return err_json("401 Unauthorized", "bad or missing bearer token") }
     body := req.body
     jobid := jstr(body, ".job")
-    if jobid == "" { return err_json("400 Bad Request", "missing job") }
-    db := dbopen()
+    if jobid == "" { sqlite_close(db)  return err_json("400 Bad Request", "missing job") }
     status := jstr(body, ".status")
     pending := jstr(body, ".pending")
     prev := agent_pending(db, jobid)
-    upsert_agent(db, jobid, jstr(body, ".host"), jstr(body, ".goal"), jstr(body, ".provider"), status, pending, jint(body, ".iters"), jint(body, ".tokens"))
+    upsert_agent(db, jobid, aid, jstr(body, ".host"), jstr(body, ".goal"), jstr(body, ".provider"), status, pending, jint(body, ".iters"), jint(body, ".tokens"))
     append_events(db, jobid, body)
     sqlite_close(db)
-    if status == "awaiting" && pending != "" && pending != prev { go notify_park(jobid, jstr(body, ".host"), pending) }
+    if status == "awaiting" && pending != "" && pending != prev { go notify_park(jobid, jstr(body, ".host"), pending, aid) }
     res = ok_json("{\"ok\":true}")
 }
 func h_decision(req) (res) {
-    if worker_authed(req) == 0 { return err_json("401 Unauthorized", "bad or missing bearer token") }
-    jobid := query(req, "job")
-    if jobid == "" { return err_json("400 Bad Request", "missing job") }
     db := dbopen()
+    aid, ok := bearer_account(db, req)
+    if ok == 0 { sqlite_close(db)  return err_json("401 Unauthorized", "bad or missing bearer token") }
+    jobid := query(req, "job")
+    if jobid == "" { sqlite_close(db)  return err_json("400 Bad Request", "missing job") }
+    own := sqlite_query(db, "SELECT id FROM agents WHERE id = ? AND account_id = ?", []string{jobid, aid})
+    if own == "[]" { sqlite_close(db)  return ok_json("{}") }
     rows := sqlite_query(db, "SELECT id, decision, arg FROM decisions WHERE agent_id = ? AND consumed = 0 ORDER BY id LIMIT 1", []string{jobid})
     id, err := json_get(rows, "[0].id")
     if err != "" { sqlite_close(db)  return ok_json("{}") }
@@ -180,13 +212,15 @@ func h_decision(req) (res) {
 
 // ---------- human-facing: panel actions (behind basic-auth) ----------
 func h_decide(req) (res) {
-    if panel_authed(req) == 0 { return err_json("403 Forbidden", "sign in to the panel first") }
+    aid, ok := session_account(req)
+    if ok == 0 { return err_json("403 Forbidden", "sign in to the panel first") }
     jobid := form(req, "job")
     decision := form(req, "decision")
     arg := form(req, "arg")
     if jobid == "" || decision == "" { return err_json("400 Bad Request", "missing job/decision") }
     db := dbopen()
-    insert_decision(db, jobid, decision, arg)
+    own := sqlite_query(db, "SELECT id FROM agents WHERE id = ? AND account_id = ?", []string{jobid, aid})
+    if own != "[]" { insert_decision(db, jobid, decision, arg) }
     sqlite_close(db)
     res = redirect("/")
 }
@@ -271,11 +305,11 @@ func prune_stale(db) {
     sqlite_exec(db, "DELETE FROM agents WHERE status IN ('done','stopped','halted','error') AND last_seen < ?", []string{str(cutoff)})
 }
 
-func agents_json(db) (out) {
+func agents_json(db, aid) (out) {
     prune_stale(db)
-    prows := sqlite_query(db, "SELECT COUNT(*) AS c FROM agents WHERE status='awaiting'")
+    prows := sqlite_query(db, "SELECT COUNT(*) AS c FROM agents WHERE status='awaiting' AND account_id = ?", []string{aid})
     parked := parse_int(unq(jget(prows, "[0].c")))
-    rows := sqlite_query(db, "SELECT id, host, provider, status, pending, iters, tokens FROM agents ORDER BY (status='awaiting') DESC, last_seen DESC LIMIT 100", []string{})
+    rows := sqlite_query(db, "SELECT id, host, provider, status, pending, iters, tokens FROM agents WHERE account_id = ? ORDER BY (status='awaiting') DESC, last_seen DESC LIMIT 100", []string{aid})
     parts := []string{}
     i := 0
     for i < 100 {
@@ -289,7 +323,10 @@ func agents_json(db) (out) {
             i = i + 1
         }
     }
-    out = "{\"parked\":" + str(parked) + ",\"panel_url\":" + json(panel_url()) + ",\"agents\":[" + join(parts, ",") + "]}"
+    tgc := "0"
+    if account_tg(db, aid) != "" { tgc = "1" }
+    acct := "{\"email\":" + json(account_email(db, aid)) + ",\"tg\":" + tgc + ",\"tg_url\":" + json(tg_connect_url(account_tgcode(db, aid))) + "}"
+    out = "{\"parked\":" + str(parked) + ",\"panel_url\":" + json(panel_url()) + ",\"account\":" + acct + ",\"agents\":[" + join(parts, ",") + "]}"
 }
 
 // host_script: the progressive-enhancement client. Instantiates /app.wasm (built from
@@ -307,14 +344,14 @@ func host_script() (s) {
     s = s + "const send=j=>{const b=enc.encode(j);const p=Number(inst.exports.buf(BigInt(b.length)));new Uint8Array(mem.buffer).set(b,p);inst.exports.load(BigInt(p))};"
     s = s + "const reload=async()=>{try{const r=await fetch('/api/state',{credentials:'same-origin'});if(r.ok)send(await r.text())}catch(e){}};"
     s = s + "setInterval(()=>{const a=document.activeElement;if(a&&app.contains(a)&&a.tagName==='INPUT')return;reload()},2500);"
-    s = s + "app.addEventListener('submit',async e=>{e.preventDefault();const f=e.target;const body=new URLSearchParams(new FormData(f));try{await fetch('/api/decide',{method:'POST',body,credentials:'same-origin'})}catch(x){}f.reset&&f.reset();reload()});"
+    s = s + "app.addEventListener('submit',async e=>{const f=e.target;if(!(f.action||'').endsWith('/api/decide'))return;e.preventDefault();const body=new URLSearchParams(new FormData(f));try{await fetch('/api/decide',{method:'POST',body,credentials:'same-origin'})}catch(x){}f.reset&&f.reset();reload()});"
     s = s + "reload();"
     s = s + "})();</script>"
 }
 
-func page() (h) {
+func page(aid) (h) {
     db := dbopen()
-    body := render_agents(agents_json(db))
+    body := render_agents(agents_json(db, aid))
     sqlite_close(db)
     h = "<!doctype html><html lang=en><head><meta charset=utf-8>"
     h = h + "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
@@ -358,23 +395,34 @@ func handle(req) (res) {
     if p == "/v1/decision" { return h_decision(req) }
     if p == "/app.wasm" { return ok_wasm(read_file_bytes("app.wasm")) }
     if p == "/api/state" {
-        if panel_authed(req) == 0 { return err_json("403 Forbidden", "sign in") }
+        aid, ok := session_account(req)
+        if ok == 0 { return err_json("403 Forbidden", "sign in") }
         db := dbopen()
-        j := agents_json(db)
+        j := agents_json(db, aid)
         sqlite_close(db)
         return ok_json(j)
     }
     if p == "/login" && req.method == "POST" { return h_login(req) }
+    if p == "/auth" { return h_auth(req) }
+    if p == "/logout" { return h_logout(req) }
+    if p == "/account/regen" && req.method == "POST" { return h_regen(req) }
+    if p == "/account/tg-off" && req.method == "POST" { return h_tgoff(req) }
     if p == "/api/decide" && req.method == "POST" { return h_decide(req) }
     if p == "/a" && req.method == "POST" { return h_onetap_post(req) }
     if p == "/a" { return h_onetap_get(req) }
     if p == "/" {
-        if panel_authed(req) == 0 { return response("200 OK", "text/html; charset=utf-8", login_page("")) }
-        return ok_html(page())
+        aid, ok := session_account(req)
+        if ok == 0 { return response("200 OK", "text/html; charset=utf-8", login_page("", 0)) }
+        return ok_html(page(aid))
     }
     res = not_found()
 }
 func serve_app(port) {
+    db := dbopen()
+    accounts_schema(db)
+    seed_default(db)
+    sqlite_close(db)
+    go tg_poller()
     println("{\"ok\":true,\"service\":\"roam-panel\",\"port\":" + str(port) + ",\"db\":" + json(dbpath()) + "}")
     serve(port, func(req) { return handle(req) })
 }

@@ -1,6 +1,6 @@
 # roam-panel — build targets. Requires the `machin` compiler + zig (for --target wasm).
 VERSION ?= 0.2.0
-SRCS = src/machweb.src src/flags.src src/view.src src/server.src src/main.src
+SRCS = src/machweb.src src/flags.src src/view.src src/accounts.src src/server.src src/main.src
 
 .PHONY: build release clean
 
