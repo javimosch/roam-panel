@@ -246,13 +246,33 @@ func styles() (s) {
     s = s + "details.jr{margin-top:12px}details.jr>summary{color:var(--faint);font-size:11.5px;cursor:pointer;list-style:none}details.jr>summary::-webkit-details-marker{display:none}details.jr>summary:before{content:'\\25B8 ';color:var(--faint)}details.jr[open]>summary:before{content:'\\25BE '}details.jr[open]>summary{margin-bottom:7px}"
     s = s + ".jr .ln{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;color:var(--mut);padding:2px 0;overflow-wrap:anywhere}.jr .k{color:var(--faint);margin-right:7px}"
     s = s + ".empty{text-align:center;color:var(--mut);padding:44px 16px;line-height:1.7}.empty code{background:var(--surf2);padding:2px 7px;border-radius:6px;color:#cbd5e1}"
+    s = s + "details.help{background:var(--surf);border:1px solid var(--bd);border-radius:12px;padding:10px 14px;margin:4px 0 8px}details.help>summary{color:var(--amber);font-weight:700;font-size:13px;cursor:pointer;list-style:none}details.help>summary::-webkit-details-marker{display:none}details.help[open]>summary{margin-bottom:8px}details.help p{color:var(--mut);font-size:12.5px;margin:8px 0;line-height:1.55}details.help code{background:var(--surf2);padding:1px 6px;border-radius:5px;color:#cbd5e1;font-size:12px}details.help pre{background:#05070a;border:1px solid var(--bd);color:#eef2f7;padding:11px;border-radius:9px;overflow-x:auto;font-size:12px;white-space:pre;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}"
     s = s + "footer{color:var(--faint);font-size:11px;margin-top:24px;text-align:center;line-height:1.7}"
     s = s + "</style>"
 }
 
 // agents_json builds the /api/state payload: agents (parked-first) each with a
 // compact recent-journal array. Shared by GET /api/state and the SSR initial render.
+// prune_stale removes terminal agents (done/stopped/halted/error) whose last report is
+// older than PRUNE_TTL_SECS (default 1h) plus their journal, so the panel stays tidy.
+func prune_stale(db) {
+    ttl := parse_int(env_or("PRUNE_TTL_SECS", "3600"))
+    if ttl <= 0 { return }
+    cutoff := now() - ttl
+    dead := sqlite_query(db, "SELECT id FROM agents WHERE status IN ('done','stopped','halted','error') AND last_seen < ?", []string{str(cutoff)})
+    i := 0
+    for i < 1000 {
+        id, e := json_get(dead, "[" + str(i) + "].id")
+        if e != "" { i = 1000 } else {
+            sqlite_exec(db, "DELETE FROM events WHERE agent_id = ?", []string{unq(id)})
+            i = i + 1
+        }
+    }
+    sqlite_exec(db, "DELETE FROM agents WHERE status IN ('done','stopped','halted','error') AND last_seen < ?", []string{str(cutoff)})
+}
+
 func agents_json(db) (out) {
+    prune_stale(db)
     prows := sqlite_query(db, "SELECT COUNT(*) AS c FROM agents WHERE status='awaiting'")
     parked := parse_int(unq(jget(prows, "[0].c")))
     rows := sqlite_query(db, "SELECT id, host, provider, status, pending, iters, tokens FROM agents ORDER BY (status='awaiting') DESC, last_seen DESC LIMIT 100", []string{})
@@ -269,7 +289,7 @@ func agents_json(db) (out) {
             i = i + 1
         }
     }
-    out = "{\"parked\":" + str(parked) + ",\"agents\":[" + join(parts, ",") + "]}"
+    out = "{\"parked\":" + str(parked) + ",\"panel_url\":" + json(panel_url()) + ",\"agents\":[" + join(parts, ",") + "]}"
 }
 
 // host_script: the progressive-enhancement client. Instantiates /app.wasm (built from

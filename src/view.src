@@ -71,20 +71,37 @@ func render_card(j, i) (h) {
     h = h + "</div>"
 }
 
-// the whole agent list from an /api/state payload {"parked":N,"agents":[...]}.
-// Begins with the live "N needs approval" banner so it updates with the list.
+// help_block: a collapsible "how to use this panel" with the exact dispatch command,
+// so a first-time operator knows how to make an agent show up here for approval.
+func help_block(purl, parked) (h) {
+    if purl == "" { purl = "https://panel.roam.intrane.fr" }
+    op := ""
+    if parked == 0 { op = " open" }   // teach when there's nothing to approve; collapse when busy
+    h = "<details class=help" + op + "><summary>&#9432; How to use this panel</summary>"
+    h = h + "<p>From your terminal, dispatch an agent with <code>--confirm --hub</code>. When it reaches a destructive command it <b>parks here</b> for your approval (and emails you a one-tap link):</p>"
+    h = h + "<pre>roam send --to my-box --provider anthropic \\\n  --confirm --hub " + esc(purl) + " \\\n  --hub-token &lt;your-token&gt; \\\n  --goal \"clone repo X, run tests, then git push\"</pre>"
+    h = h + "<p><b>Approve</b> runs the command &middot; <b>Deny</b> refuses it &middot; <b>Stop</b> ends the agent &middot; <b>Steer</b> sends it a note. Get your token on the hub with <code>roam-panel token</code>.</p>"
+    h = h + "<p><b>debri</b> (Devin) agents can't be approved per-command &mdash; with <code>--confirm</code> you approve the whole session before it starts; otherwise you watch + Stop.</p>"
+    h = h + "</details>"
+}
+
+// the whole agent list from an /api/state payload {"parked":N,"panel_url":"…","agents":[...]}.
+// Begins with the live "N needs approval" banner + a collapsible how-to, then the cards.
 func render_agents(j) (h) {
     parked := jint(j, ".parked")
     h = "<div class=summary>all quiet</div>"
     if parked == 1 { h = "<div class=\"summary hot\">1 needs approval</div>" }
     if parked > 1 { h = "<div class=\"summary hot\">" + str(parked) + " need approval</div>" }
+    h = h + help_block(jstr(j, ".panel_url"), parked)
+    cnt := 0
     i := 0
     for i < 200 {
         id, e := json_get(j, ".agents[" + str(i) + "].id")
         if e != "" { i = 200 } else {
             h = h + render_card(j, i)
+            cnt = cnt + 1
             i = i + 1
         }
     }
-    if h == "" { h = "<div class=empty>No agents yet.<br>Dispatch one with <code>roam send --hub &hellip;</code></div>" }
+    if cnt == 0 { h = h + "<div class=empty>No agents yet &mdash; dispatch one (see <b>How to use this panel</b> above), or wait for one to report in.</div>" }
 }
