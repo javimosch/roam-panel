@@ -83,8 +83,8 @@ self-describing catalog.
 |---|---|---|
 | `POST /v1/report` | Bearer worker token | agent posts status + journal delta; fires the email on a new park |
 | `GET /v1/decision?job=<id>` | Bearer worker token | agent polls for an approve/deny/stop/steer decision (consumed once) |
-| `GET /` | basic-auth (proxy) | mobile panel |
-| `POST /api/decide` | basic-auth (proxy) | panel approve/deny/stop/steer |
+| `GET /` | session (`PANEL_PASSWORD`) | mobile panel |
+| `POST /api/decide` | session (`PANEL_PASSWORD`) | panel approve/deny/stop/steer |
 | `GET /a?j=&d=&e=&t=` | HMAC-signed | one-tap link → a POST **confirmation** page |
 | `POST /a` | HMAC-signed | apply the one-tap decision |
 | `GET /_health` | — | `{"ok":true,"service":"roam-panel"}` |
@@ -95,7 +95,10 @@ self-describing catalog.
 - **One-tap links:** HMAC-SHA256 over `job|decision|exp` with a 30-min expiry. Email
   security scanners follow GET links, so `/a` GET only renders a **POST confirmation** — the
   state change happens on POST, which scanners don't submit.
-- **Panel browsing** is expected to sit behind basic-auth at the reverse proxy.
+- **Panel browsing** (`GET /`, `POST /api/decide`) is gated by an in-app session cookie
+  (`PANEL_PASSWORD`), signed with `ROAM_PANEL_SECRET`. The worker endpoints (bearer) and
+  one-tap links (HMAC) stay public with their own auth, so no proxy basic-auth is needed
+  (which would otherwise break both).
 - Approve runs a destructive command — the worker still enforces its own `--max-denials`
   budget as a backstop.
 - All secrets via env, never committed; TLS terminated at the proxy.

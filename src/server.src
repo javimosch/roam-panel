@@ -74,6 +74,31 @@ func worker_authed(req) (ok) {
     if sha256(tok) == sha256(want) { ok = 1 }    // compare hashes, not raw
 }
 
+// ---- panel auth: a session cookie guarding the browse UI + /api/decide. The worker
+// endpoints (bearer) and the one-tap /a links (HMAC) stay public with their own auth,
+// so basic-auth on the whole domain (which would break both) is NOT needed.
+func panel_pass() (p) { p = env_or("PANEL_PASSWORD", "") }
+func panel_authed(req) (ok) {
+    ok = 0
+    if panel_pass() == "" { ok = 1  return ok }   // no password set -> open (dev only)
+    v, o := get_session(req, sign_secret(), "rp")
+    if o == 1 && v == "ok" { ok = 1 }
+}
+func login_page(errmsg) (h) {
+    h = "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>roam panel — sign in</title>" + styles() + "</head><body>"
+    h = h + "<h1>&#128760; roam panel</h1>"
+    if errmsg != "" { h = h + "<div class=ag style=\"border-color:#b91c1c\"><div class=sub>" + esc(errmsg) + "</div></div>" }
+    h = h + "<form method=post action=/login class=ag><div class=row><input type=password name=password placeholder=password autofocus><button class=ap>Sign in</button></div></form></body></html>"
+}
+func h_login(req) (res) {
+    if panel_pass() != "" && form(req, "password") == panel_pass() {
+        res = redirect("/")
+        res = set_session(res, sign_secret(), "rp", "ok")
+        return res
+    }
+    res = response("200 OK", "text/html; charset=utf-8", login_page("wrong password"))
+}
+
 // ---------- one-tap link signing (HMAC-SHA256 over job|decision|exp) ----------
 func sign_link(jobid, decision, exp) (t) { t = hmac_sha256(sign_secret(), jobid + "|" + decision + "|" + exp) }
 func verify_link(jobid, decision, exp, t) (ok) {
@@ -170,6 +195,7 @@ func h_decision(req) (res) {
 
 // ---------- human-facing: panel actions (behind basic-auth) ----------
 func h_decide(req) (res) {
+    if panel_authed(req) == 0 { return err_json("403 Forbidden", "sign in to the panel first") }
     jobid := form(req, "job")
     decision := form(req, "decision")
     arg := form(req, "arg")
@@ -317,10 +343,14 @@ func handle(req) (res) {
     if p == "/_health" { return ok_json("{\"ok\":true,\"service\":\"roam-panel\"}") }
     if p == "/v1/report" && req.method == "POST" { return h_report(req) }
     if p == "/v1/decision" { return h_decision(req) }
+    if p == "/login" && req.method == "POST" { return h_login(req) }
     if p == "/api/decide" && req.method == "POST" { return h_decide(req) }
     if p == "/a" && req.method == "POST" { return h_onetap_post(req) }
     if p == "/a" { return h_onetap_get(req) }
-    if p == "/" { return ok_html(page()) }
+    if p == "/" {
+        if panel_authed(req) == 0 { return response("200 OK", "text/html; charset=utf-8", login_page("")) }
+        return ok_html(page())
+    }
     res = not_found()
 }
 func serve_app(port) {
