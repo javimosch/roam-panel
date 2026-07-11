@@ -1,0 +1,15 @@
+# build output
+/roam-panel
+/roam-panel-x86_64-linux
+/roam-panel-x86_64-linux.sha256
+/build/
+*.mfl
+
+# runtime state
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# secrets
+.env

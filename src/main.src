@@ -1,0 +1,56 @@
+// roam-panel — the agent-first CLI. stdout = JSON answer; stderr = structured error;
+// semantic exit codes (0 ok · 80-89 input · 100-109 integration · 110-119 internal).
+// `help-json` is the self-describing catalog an agent reads first. `serve` is the daemon.
+
+func die(code, msg) { write(2, "{\"ok\":false,\"error\":" + json(msg) + "}\n")  exit(code) }
+func arg_at(rest, i) (s) { s = ""  if i < len(rest) { s = rest[i] } }
+
+func print_help_json() {
+    println("{\"version\":\"1\",\"ok\":true,\"tool\":\"roam-panel\"," +
+        "\"summary\":\"approval control-plane for roam: remote agents report in; approve/deny/steer/stop them from your phone\"," +
+        "\"commands\":[" +
+        "{\"name\":\"serve\",\"args\":\"--port N\",\"desc\":\"run the hub daemon (HTTP API + SQLite + mobile SSR panel)\"}," +
+        "{\"name\":\"list\",\"args\":\"\",\"desc\":\"agents as JSON (id, host, status, pending, iters)\"}," +
+        "{\"name\":\"token\",\"args\":\"[--gen]\",\"desc\":\"print the configured worker token, or --gen a fresh one to set as ROAM_HUB_TOKEN\"}" +
+        "]," +
+        "\"env\":[\"ROAM_HUB_TOKEN (worker bearer token)\",\"ROAM_PANEL_SECRET (one-tap link HMAC key)\",\"PANEL_URL\",\"RESEND_API_KEY\",\"RESEND_FROM\",\"APPROVE_EMAIL\",\"ROAM_PANEL_DB (default roam-panel.db)\"]," +
+        "\"exit_codes\":\"0 ok | 80-89 input | 100-109 integration | 110-119 internal\"}")
+}
+
+func cmd_list() {
+    db := dbopen()
+    rows := sqlite_query(db, "SELECT id, host, provider, status, pending, iters, tokens, last_seen FROM agents ORDER BY last_seen DESC LIMIT 200", []string{})
+    sqlite_close(db)
+    println("{\"ok\":true,\"agents\":" + rows + "}")
+}
+
+func cmd_token(gen) {
+    if gen == 1 {
+        t := to_hex(rand_bytes(24))
+        println("{\"ok\":true,\"token\":" + json(t) + ",\"note\":\"set ROAM_HUB_TOKEN=<token> on the hub, and pass --hub-token <token> to `roam send`\"}")
+        return
+    }
+    t := hub_token()
+    if t == "" { die(80, "ROAM_HUB_TOKEN not set (run `roam-panel token --gen` to mint one)") }
+    println("{\"ok\":true,\"token\":" + json(t) + "}")
+}
+
+func main() {
+    fs := new_flags("roam-panel")
+    fs = flag_int(fs, "port", "p", "8099", "serve port")
+    fs = flag_bool(fs, "gen", "g", "generate a fresh token (token command)")
+    fs = parse_flags(fs, args())
+    rest := flag_args(fs)
+    cmd := arg_at(rest, 0)
+
+    if cmd == "" || cmd == "help" || cmd == "help-json" { print_help_json()  return }
+    if cmd == "serve" { serve_app(flag_int_val(fs, "port"))  return }
+    if cmd == "list" { cmd_list()  return }
+    if cmd == "token" {
+        g := 0
+        if flag_on(fs, "gen") { g = 1 }
+        cmd_token(g)
+        return
+    }
+    die(80, "unknown command: " + cmd + " (try help-json)")
+}

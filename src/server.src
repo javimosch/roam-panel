@@ -1,0 +1,329 @@
+// roam-panel — the approval control-plane hub for roam.
+//
+// One machin binary: an agent-first CLI + a `serve` daemon (machweb + SQLite). Remote
+// roam workers POST their journal + status here (`--hub`); when a worker PARKS on a
+// destructive command (status `awaiting`, the exact command in `pending`) the hub emails
+// you a Resend message with one-tap SIGNED approve/deny links, and you can also
+// approve/deny/steer/stop from a mobile web page. Workers poll `GET /v1/decision` and
+// apply your decision at their next checkpoint.
+//
+// Concurrency: machweb runs one goroutine per connection, so each handler opens its OWN
+// SQLite connection (WAL + busy_timeout) and closes it before returning — never a shared
+// handle (grepapi/crmd pattern).
+//
+// SAFETY: email security scanners follow GET links, so a signed link lands on a POST
+// *confirmation* page (scanners don't submit forms) — the state change happens on POST.
+
+// ---------- env / config ----------
+func env_or(k, d) (v) { v = env(k)  if v == "" { v = d } }
+func hub_token() (t) { t = env_or("ROAM_HUB_TOKEN", "") }
+func sign_secret() (s) { s = env_or("ROAM_PANEL_SECRET", "") }
+func panel_url() (u) { u = env_or("PANEL_URL", "http://localhost:8099") }
+func resend_key() (k) { k = env_or("RESEND_API_KEY", "") }
+func resend_from() (f) { f = env_or("RESEND_FROM", "Roam Panel <javi@intrane.fr>") }
+func approve_email() (e) { e = env_or("APPROVE_EMAIL", "") }
+func link_ttl() (n) { n = 1800 }   // one-tap links valid 30 min
+
+// ---------- db ----------
+func dbpath() (p) { p = env_or("ROAM_PANEL_DB", "roam-panel.db") }
+func dbopen() (db) {
+    db = sqlite_open(dbpath())
+    sqlite_exec(db, "PRAGMA journal_mode=WAL", []string{})
+    sqlite_exec(db, "PRAGMA busy_timeout=4000", []string{})
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, host TEXT, goal TEXT, provider TEXT, status TEXT, pending TEXT, iters INTEGER, tokens INTEGER, last_seen INTEGER, created INTEGER)", []string{})
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, wid INTEGER, ts INTEGER, kind TEXT, msg TEXT, UNIQUE(agent_id, wid))", []string{})
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, decision TEXT, arg TEXT, ts INTEGER, consumed INTEGER DEFAULT 0)", []string{})
+}
+
+// ---------- json / string helpers (absence-safe: machin parse()/json_get segfault-guarded) ----------
+func unq(s) (out) {
+    out = s
+    if len(s) >= 2 && has_prefix(s, "\"") && has_suffix(s, "\"") { out = substr(s, 1, len(s) - 1) }
+}
+func jget(body, path) (v) { r, err := json_get(body, path)  v = ""  if err == "" { v = r } }
+func jstr(body, path) (v) { r, err := json_get(body, path)  v = ""  if err == "" { v = unq(r) } }
+func jint(body, path) (n) { r, err := json_get(body, path)  n = 0  if err == "" { n = parse_int(r) } }
+func err_json(status, msg) (r) { r = response(status, "application/json", "{\"ok\":false,\"error\":" + json(msg) + "}") }
+func first_n(s, k) (out) { out = s  if len(s) > k { out = substr(s, 0, k) + "…" } }
+// form(req,name): parse an application/x-www-form-urlencoded body (mirrors machweb query()).
+func form(req, name) (v) {
+    v = ""
+    for _, part := range split(req.body, "&") {
+        eq := index(part, "=")
+        if eq > 0 {
+            if substr(part, 0, eq) == name { v = url_decode(substr(part, eq + 1, len(part))) }
+        }
+    }
+}
+// html-escape for untrusted strings rendered into the SSR page.
+func esc(s) (out) {
+    out = replace(s, "&", "&amp;")
+    out = replace(out, "<", "&lt;")
+    out = replace(out, ">", "&gt;")
+    out = replace(out, "\"", "&quot;")
+}
+
+// ---------- worker auth (single shared bearer token for M0) ----------
+func worker_authed(req) (ok) {
+    ok = 0
+    want := hub_token()
+    if want == "" { return ok }                 // no token configured -> reject everything
+    h := header(req, "authorization")
+    if !has_prefix(h, "Bearer ") { return ok }
+    tok := trim(substr(h, 7, len(h)))
+    if sha256(tok) == sha256(want) { ok = 1 }    // compare hashes, not raw
+}
+
+// ---------- one-tap link signing (HMAC-SHA256 over job|decision|exp) ----------
+func sign_link(jobid, decision, exp) (t) { t = hmac_sha256(sign_secret(), jobid + "|" + decision + "|" + exp) }
+func verify_link(jobid, decision, exp, t) (ok) {
+    ok = 0
+    if sign_secret() == "" { return ok }
+    if t == "" { return ok }
+    if sign_link(jobid, decision, exp) != t { return ok }
+    if now() >= parse_int(exp) { return ok }     // expired
+    ok = 1
+}
+func onetap_url(jobid, decision) (u) {
+    exp := str(now() + link_ttl())
+    u = panel_url() + "/a?j=" + url_encode(jobid) + "&d=" + decision + "&e=" + exp + "&t=" + sign_link(jobid, decision, exp)
+}
+
+// ---------- agent / decision storage ----------
+func agent_pending(db, jobid) (p) {
+    rows := sqlite_query(db, "SELECT pending FROM agents WHERE id = ?", []string{jobid})
+    p = unq(jget(rows, "[0].pending"))
+}
+func upsert_agent(db, id, host, goal, provider, status, pending, iters, toks) {
+    n := str(now())
+    sqlite_exec(db, "INSERT INTO agents (id,host,goal,provider,status,pending,iters,tokens,last_seen,created) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET host=excluded.host, goal=excluded.goal, provider=excluded.provider, status=excluded.status, pending=excluded.pending, iters=excluded.iters, tokens=excluded.tokens, last_seen=excluded.last_seen",
+        []string{id, host, goal, provider, status, pending, str(iters), str(toks), n, n})
+}
+func append_events(db, jobid, body) {
+    i := 0
+    for i < 500 {
+        raw, err := json_get(body, ".events[" + str(i) + "].id")
+        if err != "" { return }
+        wid := parse_int(raw)
+        ts := jint(body, ".events[" + str(i) + "].ts")
+        kind := jstr(body, ".events[" + str(i) + "].kind")
+        msg := jstr(body, ".events[" + str(i) + "].msg")
+        sqlite_exec(db, "INSERT OR IGNORE INTO events (agent_id,wid,ts,kind,msg) VALUES (?,?,?,?,?)", []string{jobid, str(wid), str(ts), kind, msg})
+        i = i + 1
+    }
+}
+func insert_decision(db, jobid, decision, arg) {
+    sqlite_exec(db, "INSERT INTO decisions (agent_id,decision,arg,ts,consumed) VALUES (?,?,?,?,0)", []string{jobid, decision, arg, str(now())})
+}
+
+// ---------- Resend email on park (runs off the request path via `go`) ----------
+func notify_park(jobid, host, cmd) {
+    key := resend_key()
+    to := approve_email()
+    if key == "" { return }
+    if to == "" { return }
+    approve := onetap_url(jobid, "approve")
+    deny := onetap_url(jobid, "deny")
+    subj := "roam: agent " + host + " wants to run: " + first_n(cmd, 80)
+    html := "<div style=\"font-family:system-ui,sans-serif;max-width:520px\">"
+    html = html + "<p>Agent <b>" + esc(host) + "</b> (<code>" + esc(jobid) + "</code>) parked on a destructive command:</p>"
+    html = html + "<pre style=\"background:#111;color:#eee;padding:12px;border-radius:8px;overflow:auto\">" + esc(cmd) + "</pre>"
+    html = html + "<p><a href=\"" + approve + "\" style=\"display:inline-block;background:#16a34a;color:#fff;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:600\">Approve</a>"
+    html = html + "&nbsp;&nbsp;<a href=\"" + deny + "\" style=\"display:inline-block;background:#dc2626;color:#fff;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:600\">Deny</a></p>"
+    html = html + "<p style=\"color:#888;font-size:13px\">Links expire in 30 min. Or open the <a href=\"" + panel_url() + "\">panel</a>.</p></div>"
+    body := "{\"from\":" + json(resend_from()) + ",\"to\":[" + json(to) + "],\"subject\":" + json(subj) + ",\"html\":" + json(html) + "}"
+    hdrs := []string{"Authorization: Bearer " + key, "Content-Type: application/json"}
+    st, _, _ := http_request("POST", "https://api.resend.com/emails", hdrs, body)
+    if st != 200 { return }
+}
+
+// ---------- worker-facing endpoints ----------
+func h_report(req) (res) {
+    if worker_authed(req) == 0 { return err_json("401 Unauthorized", "bad or missing bearer token") }
+    body := req.body
+    jobid := jstr(body, ".job")
+    if jobid == "" { return err_json("400 Bad Request", "missing job") }
+    db := dbopen()
+    status := jstr(body, ".status")
+    pending := jstr(body, ".pending")
+    prev := agent_pending(db, jobid)
+    upsert_agent(db, jobid, jstr(body, ".host"), jstr(body, ".goal"), jstr(body, ".provider"), status, pending, jint(body, ".iters"), jint(body, ".tokens"))
+    append_events(db, jobid, body)
+    sqlite_close(db)
+    if status == "awaiting" && pending != "" && pending != prev { go notify_park(jobid, jstr(body, ".host"), pending) }
+    res = ok_json("{\"ok\":true}")
+}
+func h_decision(req) (res) {
+    if worker_authed(req) == 0 { return err_json("401 Unauthorized", "bad or missing bearer token") }
+    jobid := query(req, "job")
+    if jobid == "" { return err_json("400 Bad Request", "missing job") }
+    db := dbopen()
+    rows := sqlite_query(db, "SELECT id, decision, arg FROM decisions WHERE agent_id = ? AND consumed = 0 ORDER BY id LIMIT 1", []string{jobid})
+    id, err := json_get(rows, "[0].id")
+    if err != "" { sqlite_close(db)  return ok_json("{}") }
+    decision := unq(jget(rows, "[0].decision"))
+    arg := unq(jget(rows, "[0].arg"))
+    sqlite_exec(db, "UPDATE decisions SET consumed = 1 WHERE id = ?", []string{unq(id)})
+    sqlite_close(db)
+    res = ok_json("{\"decision\":" + json(decision) + ",\"arg\":" + json(arg) + "}")
+}
+
+// ---------- human-facing: panel actions (behind basic-auth) ----------
+func h_decide(req) (res) {
+    jobid := form(req, "job")
+    decision := form(req, "decision")
+    arg := form(req, "arg")
+    if jobid == "" || decision == "" { return err_json("400 Bad Request", "missing job/decision") }
+    db := dbopen()
+    insert_decision(db, jobid, decision, arg)
+    sqlite_close(db)
+    res = redirect("/")
+}
+
+// ---------- human-facing: signed one-tap link (from email) ----------
+// GET /a — verify signature, then render a POST confirmation (scanner-safe).
+func h_onetap_get(req) (res) {
+    jobid := query(req, "j")
+    decision := query(req, "d")
+    exp := query(req, "e")
+    t := query(req, "t")
+    if verify_link(jobid, decision, exp, t) == 0 { return response("403 Forbidden", "text/html; charset=utf-8", conf_page("Invalid or expired link", "", "", "", "", "", "")) }
+    db := dbopen()
+    cmd := ""
+    rows := sqlite_query(db, "SELECT pending, host FROM agents WHERE id = ?", []string{jobid})
+    cmd = unq(jget(rows, "[0].pending"))
+    host := unq(jget(rows, "[0].host"))
+    sqlite_close(db)
+    res = response("200 OK", "text/html; charset=utf-8", conf_page("Confirm " + decision, jobid, decision, exp, t, cmd, host))
+}
+// POST /a — re-verify signature, apply the decision (scanners don't POST).
+func h_onetap_post(req) (res) {
+    jobid := form(req, "j")
+    decision := form(req, "d")
+    exp := form(req, "e")
+    t := form(req, "t")
+    if verify_link(jobid, decision, exp, t) == 0 { return response("403 Forbidden", "text/html; charset=utf-8", conf_page("Invalid or expired link", "", "", "", "", "", "")) }
+    db := dbopen()
+    insert_decision(db, jobid, decision, "")
+    sqlite_close(db)
+    res = response("200 OK", "text/html; charset=utf-8", done_page(decision))
+}
+
+// ---------- SSR pages ----------
+func styles() (s) {
+    s = "<style>*{box-sizing:border-box}body{font-family:system-ui,-apple-system,sans-serif;background:#0a0a0b;color:#e5e7eb;margin:0;padding:16px;max-width:760px;margin:0 auto}"
+    s = s + "h1{font-size:20px;margin:8px 0 4px}.sub{color:#8b8f98;font-size:13px}"
+    s = s + ".ag{background:#141416;border:1px solid #232327;border-radius:12px;padding:14px;margin:12px 0}"
+    s = s + ".park{border-color:#a16207;background:#1a1508}"
+    s = s + ".row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.host{font-weight:700}.pv{color:#8b8f98;font-size:12px}"
+    s = s + ".badge{font-size:11px;padding:2px 8px;border-radius:999px;background:#232327;color:#cbd5e1}"
+    s = s + ".b-awaiting{background:#a16207;color:#fff}.b-running{background:#1d4ed8;color:#fff}.b-done{background:#166534;color:#fff}.b-error{background:#b91c1c;color:#fff}.b-halted,.b-stopped{background:#3f3f46;color:#fff}"
+    s = s + "pre{background:#000;color:#f5f5f5;padding:10px;border-radius:8px;overflow:auto;font-size:13px;margin:8px 0}"
+    s = s + "button,.btn{border:0;border-radius:8px;padding:9px 16px;font-weight:600;font-size:14px;cursor:pointer}"
+    s = s + ".ap{background:#16a34a;color:#fff}.dn{background:#dc2626;color:#fff}.st{background:#3f3f46;color:#fff}"
+    s = s + "form{display:inline}input[type=text]{background:#0a0a0b;border:1px solid #333;color:#eee;border-radius:8px;padding:8px;width:60%}"
+    s = s + ".jr{font-size:12px;color:#9aa0aa;margin-top:8px}.jr div{padding:1px 0}.k{color:#6b7280}"
+    s = s + "footer{color:#6b7280;font-size:12px;margin-top:24px;text-align:center}</style>"
+}
+func status_badge(st) (h) { h = "<span class=\"badge b-" + esc(st) + "\">" + esc(st) + "</span>" }
+
+func ssr_agent(db, jobid, host, provider, status, pending, iters) (h) {
+    cls := "ag"
+    if status == "awaiting" { cls = "ag park" }
+    h = "<div class=\"" + cls + "\">"
+    h = h + "<div class=row><span class=host>" + esc(host) + "</span>" + status_badge(status)
+    h = h + "<span class=pv>" + esc(provider) + " &middot; " + esc(jobid) + " &middot; iter " + str(iters) + "</span></div>"
+    if status == "awaiting" && pending != "" {
+        h = h + "<pre>" + esc(pending) + "</pre>"
+        h = h + "<div class=row>"
+        h = h + "<form method=post action=/api/decide><input type=hidden name=job value=\"" + esc(jobid) + "\"><input type=hidden name=decision value=approve><button class=ap>Approve</button></form>"
+        h = h + "<form method=post action=/api/decide><input type=hidden name=job value=\"" + esc(jobid) + "\"><input type=hidden name=decision value=deny><button class=dn>Deny</button></form>"
+        h = h + "</div>"
+    }
+    // stop + steer available for any live agent
+    if status == "running" || status == "awaiting" || status == "paused" {
+        h = h + "<div class=row style=\"margin-top:8px\">"
+        h = h + "<form method=post action=/api/decide><input type=hidden name=job value=\"" + esc(jobid) + "\"><input type=hidden name=decision value=stop><button class=st>Stop</button></form>"
+        h = h + "<form method=post action=/api/decide><input type=hidden name=job value=\"" + esc(jobid) + "\"><input type=hidden name=decision value=note><input type=text name=arg placeholder=\"steer note…\"><button class=st>Steer</button></form>"
+        h = h + "</div>"
+    }
+    // recent journal
+    rows := sqlite_query(db, "SELECT ts, kind, msg FROM events WHERE agent_id = ? ORDER BY id DESC LIMIT 6", []string{jobid})
+    n := 0
+    jr := ""
+    for n < 6 {
+        m, e := json_get(rows, "[" + str(n) + "].msg")
+        if e != "" { n = 6 } else {
+            k := unq(jget(rows, "[" + str(n) + "].kind"))
+            jr = jr + "<div><span class=k>" + esc(k) + "</span> " + esc(first_n(unq(m), 140)) + "</div>"
+            n = n + 1
+        }
+    }
+    if jr != "" { h = h + "<div class=jr>" + jr + "</div>" }
+    h = h + "</div>"
+}
+
+func page() (h) {
+    db := dbopen()
+    rows := sqlite_query(db, "SELECT id, host, provider, status, pending, iters FROM agents ORDER BY (status='awaiting') DESC, last_seen DESC LIMIT 100", []string{})
+    h = "<!doctype html><html lang=en><head><meta charset=utf-8>"
+    h = h + "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
+    h = h + "<meta http-equiv=refresh content=5>"
+    h = h + "<title>roam panel</title>" + styles() + "</head><body>"
+    h = h + "<h1>🛰️ roam panel</h1><div class=sub>approve your remote agents from your phone</div>"
+    i := 0
+    any := 0
+    for i < 100 {
+        id, e := json_get(rows, "[" + str(i) + "].id")
+        if e != "" { i = 100 } else {
+            jobid := unq(id)
+            h = h + ssr_agent(db, jobid, unq(jget(rows, "[" + str(i) + "].host")), unq(jget(rows, "[" + str(i) + "].provider")), unq(jget(rows, "[" + str(i) + "].status")), unq(jget(rows, "[" + str(i) + "].pending")), jint(rows, "[" + str(i) + "].iters"))
+            any = 1
+            i = i + 1
+        }
+    }
+    if any == 0 { h = h + "<div class=ag><div class=sub>no agents yet — dispatch one with <code>roam send --hub …</code></div></div>" }
+    sqlite_close(db)
+    h = h + "<footer>one self-hosted binary, built with machin &middot; per-command approve/deny is for the anthropic/openai engines; debri shows status + stop</footer>"
+    h = h + "</body></html>"
+}
+
+func conf_page(title, jobid, decision, exp, t, cmd, host) (h) {
+    h = "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>" + esc(title) + "</title>" + styles() + "</head><body>"
+    h = h + "<h1>" + esc(title) + "</h1>"
+    if jobid == "" {
+        h = h + "<div class=ag><div class=sub>This approval link is invalid or has expired. Open the <a href=\"" + panel_url() + "\">panel</a>.</div></div>"
+    } else {
+        h = h + "<div class=\"ag park\"><div class=row><span class=host>" + esc(host) + "</span><span class=pv>" + esc(jobid) + "</span></div>"
+        if cmd != "" { h = h + "<pre>" + esc(cmd) + "</pre>" }
+        cl := "ap"
+        if decision == "deny" { cl = "dn" }
+        h = h + "<form method=post action=/a>"
+        h = h + "<input type=hidden name=j value=\"" + esc(jobid) + "\"><input type=hidden name=d value=\"" + esc(decision) + "\"><input type=hidden name=e value=\"" + esc(exp) + "\"><input type=hidden name=t value=\"" + esc(t) + "\">"
+        h = h + "<button class=" + cl + ">Confirm " + esc(decision) + "</button></form></div>"
+    }
+    h = h + "</body></html>"
+}
+func done_page(decision) (h) {
+    h = "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>done</title>" + styles() + "</head><body>"
+    h = h + "<h1>✓ " + esc(decision) + " recorded</h1><div class=ag><div class=sub>The agent will apply it at its next checkpoint. You can close this. <a href=\"" + panel_url() + "\">Open panel</a></div></div></body></html>"
+}
+
+// ---------- router ----------
+func handle(req) (res) {
+    p := req.path
+    qi := index(p, "?")
+    if qi >= 0 { p = substr(p, 0, qi) }
+    if p == "/_health" { return ok_json("{\"ok\":true,\"service\":\"roam-panel\"}") }
+    if p == "/v1/report" && req.method == "POST" { return h_report(req) }
+    if p == "/v1/decision" { return h_decision(req) }
+    if p == "/api/decide" && req.method == "POST" { return h_decide(req) }
+    if p == "/a" && req.method == "POST" { return h_onetap_post(req) }
+    if p == "/a" { return h_onetap_get(req) }
+    if p == "/" { return ok_html(page()) }
+    res = not_found()
+}
+func serve_app(port) {
+    println("{\"ok\":true,\"service\":\"roam-panel\",\"port\":" + str(port) + ",\"db\":" + json(dbpath()) + "}")
+    serve(port, func(req) { return handle(req) })
+}
