@@ -1,0 +1,90 @@
+// view.src — the SHARED view, compiled into BOTH the native server (SSR, no-JS
+// fallback) and the wasm client (live updates). render_agents(json) turns an
+// /api/state payload into the agent-list HTML; the server renders it once for the
+// initial page, and the wasm client re-renders it every poll so the list stays live
+// without a full-page reload. Byte-identical markup either way (same function).
+//
+// Only pure builtins here (json_get/parse_int/replace/substr/… + the wasm string
+// marshaling) so it links clean under `--target wasm` — no machweb, no sqlite.
+
+// ---------- shared string / json helpers (absence-safe) ----------
+func unq(s) (out) {
+    out = s
+    if len(s) >= 2 && has_prefix(s, "\"") && has_suffix(s, "\"") { out = substr(s, 1, len(s) - 1) }
+}
+func jget(body, path) (v) { r, err := json_get(body, path)  v = ""  if err == "" { v = r } }
+func jstr(body, path) (v) { r, err := json_get(body, path)  v = ""  if err == "" { v = unq(r) } }
+func jint(body, path) (n) { r, err := json_get(body, path)  n = 0  if err == "" { n = parse_int(r) } }
+func first_n(s, k) (out) { out = s  if len(s) > k { out = substr(s, 0, k) + "…" } }
+func esc(s) (out) {
+    out = replace(s, "&", "&amp;")
+    out = replace(out, "<", "&lt;")
+    out = replace(out, ">", "&gt;")
+    out = replace(out, "\"", "&quot;")
+}
+func status_badge(st) (h) { h = "<span class=\"badge b-" + esc(st) + "\">" + esc(st) + "</span>" }
+
+// one agent card, read from json path ".agents[i]".
+func render_card(j, i) (h) {
+    p := ".agents[" + str(i) + "]"
+    jobid := jstr(j, p + ".id")
+    host := jstr(j, p + ".host")
+    provider := jstr(j, p + ".provider")
+    status := jstr(j, p + ".status")
+    pending := jstr(j, p + ".pending")
+    iters := jint(j, p + ".iters")
+    cls := "ag"
+    if status == "awaiting" { cls = "ag park" }
+    h = "<div class=\"" + cls + "\">"
+    h = h + "<div class=ah><span class=host>" + esc(host) + "</span>" + status_badge(status) + "</div>"
+    h = h + "<div class=meta>" + esc(provider) + " &middot; " + esc(jobid) + " &middot; iter " + str(iters) + "</div>"
+    if status == "awaiting" && pending != "" {
+        h = h + "<div class=ask>&#9888;&#65039; wants to run</div>"
+        h = h + "<div class=cmd>" + esc(pending) + "</div>"
+        h = h + "<div class=acts>"
+        h = h + "<form method=post action=/api/decide><input type=hidden name=job value=\"" + esc(jobid) + "\"><input type=hidden name=decision value=approve><button class=ap>Approve</button></form>"
+        h = h + "<form method=post action=/api/decide><input type=hidden name=job value=\"" + esc(jobid) + "\"><input type=hidden name=decision value=deny><button class=dn>Deny</button></form>"
+        h = h + "</div>"
+    }
+    if status == "running" || status == "awaiting" || status == "paused" {
+        h = h + "<div class=ctl>"
+        h = h + "<form method=post action=/api/decide><input type=hidden name=job value=\"" + esc(jobid) + "\"><input type=hidden name=decision value=stop><button class=ghost>Stop</button></form>"
+        h = h + "<form class=steer method=post action=/api/decide><input type=hidden name=job value=\"" + esc(jobid) + "\"><input type=hidden name=decision value=note><input type=text name=arg placeholder=\"steer note…\"><button class=ghost>Steer</button></form>"
+        h = h + "</div>"
+    }
+    // journal from ".agents[i].journal[k]"
+    jr := ""
+    k := 0
+    for k < 8 {
+        msg, e := json_get(j, p + ".journal[" + str(k) + "].msg")
+        if e != "" { k = 8 } else {
+            kind := jstr(j, p + ".journal[" + str(k) + "].kind")
+            jr = jr + "<div class=ln><span class=k>" + esc(kind) + "</span>" + esc(first_n(unq(msg), 160)) + "</div>"
+            k = k + 1
+        }
+    }
+    if jr != "" {
+        op := " open"
+        if status == "awaiting" { op = "" }
+        h = h + "<details class=jr" + op + "><summary>recent activity</summary>" + jr + "</details>"
+    }
+    h = h + "</div>"
+}
+
+// the whole agent list from an /api/state payload {"parked":N,"agents":[...]}.
+// Begins with the live "N needs approval" banner so it updates with the list.
+func render_agents(j) (h) {
+    parked := jint(j, ".parked")
+    h = "<div class=summary>all quiet</div>"
+    if parked == 1 { h = "<div class=\"summary hot\">1 needs approval</div>" }
+    if parked > 1 { h = "<div class=\"summary hot\">" + str(parked) + " need approval</div>" }
+    i := 0
+    for i < 200 {
+        id, e := json_get(j, ".agents[" + str(i) + "].id")
+        if e != "" { i = 200 } else {
+            h = h + render_card(j, i)
+            i = i + 1
+        }
+    }
+    if h == "" { h = "<div class=empty>No agents yet.<br>Dispatch one with <code>roam send --hub &hellip;</code></div>" }
+}

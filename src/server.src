@@ -36,15 +36,7 @@ func dbopen() (db) {
 }
 
 // ---------- json / string helpers (absence-safe: machin parse()/json_get segfault-guarded) ----------
-func unq(s) (out) {
-    out = s
-    if len(s) >= 2 && has_prefix(s, "\"") && has_suffix(s, "\"") { out = substr(s, 1, len(s) - 1) }
-}
-func jget(body, path) (v) { r, err := json_get(body, path)  v = ""  if err == "" { v = r } }
-func jstr(body, path) (v) { r, err := json_get(body, path)  v = ""  if err == "" { v = unq(r) } }
-func jint(body, path) (n) { r, err := json_get(body, path)  n = 0  if err == "" { n = parse_int(r) } }
 func err_json(status, msg) (r) { r = response(status, "application/json", "{\"ok\":false,\"error\":" + json(msg) + "}") }
-func first_n(s, k) (out) { out = s  if len(s) > k { out = substr(s, 0, k) + "…" } }
 // form(req,name): parse an application/x-www-form-urlencoded body (mirrors machweb query()).
 func form(req, name) (v) {
     v = ""
@@ -54,13 +46,6 @@ func form(req, name) (v) {
             if substr(part, 0, eq) == name { v = url_decode(substr(part, eq + 1, len(part))) }
         }
     }
-}
-// html-escape for untrusted strings rendered into the SSR page.
-func esc(s) (out) {
-    out = replace(s, "&", "&amp;")
-    out = replace(out, "<", "&lt;")
-    out = replace(out, ">", "&gt;")
-    out = replace(out, "\"", "&quot;")
 }
 
 // ---------- worker auth (single shared bearer token for M0) ----------
@@ -242,8 +227,8 @@ func styles() (s) {
     s = s + "*{box-sizing:border-box;min-width:0}html,body{overflow-x:clip;max-width:100%}"
     s = s + "body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--tx);margin:0 auto;max-width:560px;padding:16px 14px 40px;line-height:1.45;-webkit-text-size-adjust:100%}"
     s = s + "header{display:flex;align-items:center;gap:10px;margin:2px 2px 2px;min-width:0}h1{font-size:19px;font-weight:800;letter-spacing:-.01em;margin:0}"
-    s = s + ".summary{margin-left:auto;font-size:12px;font-weight:700;padding:4px 11px;border-radius:999px;background:var(--surf2);color:var(--mut);white-space:nowrap}.summary.hot{background:rgba(245,158,11,.16);color:var(--amber)}"
-    s = s + ".sub{color:var(--mut);font-size:13px;margin:2px 2px 14px}"
+    s = s + ".summary{display:inline-block;font-size:12px;font-weight:700;padding:4px 12px;border-radius:999px;background:var(--surf2);color:var(--mut);margin:0 0 4px}.summary.hot{background:rgba(245,158,11,.16);color:var(--amber)}"
+    s = s + ".sub{color:var(--mut);font-size:13px;margin:2px 2px 12px}"
     s = s + ".ag{background:var(--surf);border:1px solid var(--bd);border-radius:14px;padding:14px;margin:11px 0}"
     s = s + ".ag.park{border-color:rgba(245,158,11,.45);border-left:3px solid var(--amber);background:linear-gradient(180deg,rgba(245,158,11,.05),transparent 55%),var(--surf)}"
     s = s + ".ah{display:flex;align-items:center;gap:8px}.host{font-weight:700;font-size:15px;overflow-wrap:anywhere}"
@@ -264,79 +249,64 @@ func styles() (s) {
     s = s + "footer{color:var(--faint);font-size:11px;margin-top:24px;text-align:center;line-height:1.7}"
     s = s + "</style>"
 }
-func status_badge(st) (h) { h = "<span class=\"badge b-" + esc(st) + "\">" + esc(st) + "</span>" }
 
-func ssr_agent(db, jobid, host, provider, status, pending, iters) (h) {
-    cls := "ag"
-    if status == "awaiting" { cls = "ag park" }
-    h = "<div class=\"" + cls + "\">"
-    h = h + "<div class=ah><span class=host>" + esc(host) + "</span>" + status_badge(status) + "</div>"
-    h = h + "<div class=meta>" + esc(provider) + " &middot; " + esc(jobid) + " &middot; iter " + str(iters) + "</div>"
-    if status == "awaiting" && pending != "" {
-        h = h + "<div class=ask>&#9888;&#65039; wants to run</div>"
-        h = h + "<div class=cmd>" + esc(pending) + "</div>"
-        h = h + "<div class=acts>"
-        h = h + "<form method=post action=/api/decide><input type=hidden name=job value=\"" + esc(jobid) + "\"><input type=hidden name=decision value=approve><button class=ap>Approve</button></form>"
-        h = h + "<form method=post action=/api/decide><input type=hidden name=job value=\"" + esc(jobid) + "\"><input type=hidden name=decision value=deny><button class=dn>Deny</button></form>"
-        h = h + "</div>"
-    }
-    if status == "running" || status == "awaiting" || status == "paused" {
-        h = h + "<div class=ctl>"
-        h = h + "<form method=post action=/api/decide><input type=hidden name=job value=\"" + esc(jobid) + "\"><input type=hidden name=decision value=stop><button class=ghost>Stop</button></form>"
-        h = h + "<form class=steer method=post action=/api/decide><input type=hidden name=job value=\"" + esc(jobid) + "\"><input type=hidden name=decision value=note><input type=text name=arg placeholder=\"steer note…\"><button class=ghost>Steer</button></form>"
-        h = h + "</div>"
-    }
-    rows := sqlite_query(db, "SELECT ts, kind, msg FROM events WHERE agent_id = ? ORDER BY id DESC LIMIT 8", []string{jobid})
-    n := 0
-    jr := ""
-    for n < 8 {
-        m, e := json_get(rows, "[" + str(n) + "].msg")
-        if e != "" { n = 8 } else {
-            k := unq(jget(rows, "[" + str(n) + "].kind"))
-            jr = jr + "<div class=ln><span class=k>" + esc(k) + "</span>" + esc(first_n(unq(m), 160)) + "</div>"
-            n = n + 1
+// agents_json builds the /api/state payload: agents (parked-first) each with a
+// compact recent-journal array. Shared by GET /api/state and the SSR initial render.
+func agents_json(db) (out) {
+    prows := sqlite_query(db, "SELECT COUNT(*) AS c FROM agents WHERE status='awaiting'")
+    parked := parse_int(unq(jget(prows, "[0].c")))
+    rows := sqlite_query(db, "SELECT id, host, provider, status, pending, iters, tokens FROM agents ORDER BY (status='awaiting') DESC, last_seen DESC LIMIT 100", []string{})
+    parts := []string{}
+    i := 0
+    for i < 100 {
+        id, e := json_get(rows, "[" + str(i) + "].id")
+        if e != "" { i = 100 } else {
+            jid := unq(id)
+            pfx := "[" + str(i) + "]"
+            jrows := sqlite_query(db, "SELECT kind, msg FROM events WHERE agent_id = ? ORDER BY id DESC LIMIT 8", []string{jid})
+            obj := "{\"id\":" + json(jid) + ",\"host\":" + json(unq(jget(rows, pfx + ".host"))) + ",\"provider\":" + json(unq(jget(rows, pfx + ".provider"))) + ",\"status\":" + json(unq(jget(rows, pfx + ".status"))) + ",\"pending\":" + json(unq(jget(rows, pfx + ".pending"))) + ",\"iters\":" + str(jint(rows, pfx + ".iters")) + ",\"journal\":" + jrows + "}"
+            parts = append(parts, obj)
+            i = i + 1
         }
     }
-    if jr != "" {
-        op := " open"
-        if status == "awaiting" { op = "" }
-        h = h + "<details class=jr" + op + "><summary>recent activity</summary>" + jr + "</details>"
-    }
-    h = h + "</div>"
+    out = "{\"parked\":" + str(parked) + ",\"agents\":[" + join(parts, ",") + "]}"
+}
+
+// host_script: the progressive-enhancement client. Instantiates /app.wasm (built from
+// the SAME view.src), polls /api/state every 2.5s and re-renders the #agents list via
+// the wasm's render_agents (no full-page reload), and intercepts the approve/deny/stop/
+// steer form submits into fetch POSTs. Skips a poll while a steer input is focused so it
+// never clobbers what you are typing. With JS off, the SSR list + <noscript> refresh work.
+func host_script() (s) {
+    s = "<script type=module>(async()=>{"
+    s = s + "const app=document.getElementById('agents');let mem,inst;const dec=new TextDecoder(),enc=new TextEncoder();"
+    s = s + "const cstr=p=>{const b=new Uint8Array(mem.buffer);let e=p;while(b[e])e++;return dec.decode(b.subarray(p,e))};"
+    s = s + "const wasi={fd_write:()=>0,fd_seek:()=>0,fd_close:()=>0,fd_fdstat_get:()=>0};"
+    s = s + "try{const r=await WebAssembly.instantiateStreaming(fetch('/app.wasm'),{env:{set_html:p=>{app.innerHTML=cstr(p)}},wasi_snapshot_preview1:wasi});inst=r.instance;}catch(e){return}"
+    s = s + "mem=inst.exports.memory;inst.exports._initialize&&inst.exports._initialize();"
+    s = s + "const send=j=>{const b=enc.encode(j);const p=Number(inst.exports.buf(BigInt(b.length)));new Uint8Array(mem.buffer).set(b,p);inst.exports.load(BigInt(p))};"
+    s = s + "const reload=async()=>{try{const r=await fetch('/api/state',{credentials:'same-origin'});if(r.ok)send(await r.text())}catch(e){}};"
+    s = s + "setInterval(()=>{const a=document.activeElement;if(a&&app.contains(a)&&a.tagName==='INPUT')return;reload()},2500);"
+    s = s + "app.addEventListener('submit',async e=>{e.preventDefault();const f=e.target;const body=new URLSearchParams(new FormData(f));try{await fetch('/api/decide',{method:'POST',body,credentials:'same-origin'})}catch(x){}f.reset&&f.reset();reload()});"
+    s = s + "reload();"
+    s = s + "})();</script>"
 }
 
 func page() (h) {
     db := dbopen()
-    prows := sqlite_query(db, "SELECT COUNT(*) AS c FROM agents WHERE status='awaiting'")
-    pc := parse_int(unq(jget(prows, "[0].c")))
-    rows := sqlite_query(db, "SELECT id, host, provider, status, pending, iters FROM agents ORDER BY (status='awaiting') DESC, last_seen DESC LIMIT 100", []string{})
+    body := render_agents(agents_json(db))
+    sqlite_close(db)
     h = "<!doctype html><html lang=en><head><meta charset=utf-8>"
     h = h + "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
-    h = h + "<meta http-equiv=refresh content=6>"
     h = h + "<title>roam panel</title>" + styles() + "</head><body>"
-    sumcls := "summary"
-    sumtxt := "all quiet"
-    if pc == 1 { sumcls = "summary hot"  sumtxt = "1 needs approval" }
-    if pc > 1 { sumcls = "summary hot"  sumtxt = str(pc) + " need approval" }
-    h = h + "<header><h1>&#128752; roam panel</h1><span class=\"" + sumcls + "\">" + sumtxt + "</span></header>"
+    h = h + "<header><h1>&#128752; roam panel</h1></header>"
     h = h + "<div class=sub>approve your remote agents from your phone</div>"
-    i := 0
-    any := 0
-    for i < 100 {
-        id, e := json_get(rows, "[" + str(i) + "].id")
-        if e != "" { i = 100 } else {
-            jobid := unq(id)
-            h = h + ssr_agent(db, jobid, unq(jget(rows, "[" + str(i) + "].host")), unq(jget(rows, "[" + str(i) + "].provider")), unq(jget(rows, "[" + str(i) + "].status")), unq(jget(rows, "[" + str(i) + "].pending")), jint(rows, "[" + str(i) + "].iters"))
-            any = 1
-            i = i + 1
-        }
-    }
-    if any == 0 { h = h + "<div class=empty>No agents yet.<br>Dispatch one with <code>roam send --hub &hellip;</code></div>" }
-    sqlite_close(db)
-    h = h + "<footer>one self-hosted binary, built with machin &middot; auto-refreshes &middot; per-command approve/deny is anthropic/openai; debri shows status + stop</footer>"
+    h = h + "<div id=agents>" + body + "</div>"
+    h = h + "<footer>one self-hosted binary, built with machin &middot; live &middot; per-command approve/deny is anthropic/openai; debri = session approval + stop</footer>"
+    h = h + "<noscript><meta http-equiv=\"refresh\" content=\"8\"></noscript>"
+    h = h + host_script()
     h = h + "</body></html>"
 }
-
 func conf_page(title, jobid, decision, exp, t, cmd, host) (h) {
     h = "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>" + esc(title) + "</title>" + styles() + "</head><body>"
     h = h + "<h1>" + esc(title) + "</h1>"
@@ -366,6 +336,14 @@ func handle(req) (res) {
     if p == "/_health" { return ok_json("{\"ok\":true,\"service\":\"roam-panel\"}") }
     if p == "/v1/report" && req.method == "POST" { return h_report(req) }
     if p == "/v1/decision" { return h_decision(req) }
+    if p == "/app.wasm" { return ok_wasm(read_file_bytes("app.wasm")) }
+    if p == "/api/state" {
+        if panel_authed(req) == 0 { return err_json("403 Forbidden", "sign in") }
+        db := dbopen()
+        j := agents_json(db)
+        sqlite_close(db)
+        return ok_json(j)
+    }
     if p == "/login" && req.method == "POST" { return h_login(req) }
     if p == "/api/decide" && req.method == "POST" { return h_decide(req) }
     if p == "/a" && req.method == "POST" { return h_onetap_post(req) }

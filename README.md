@@ -10,7 +10,10 @@ the moment one parks** with one-tap approve/deny links, and you can **approve / 
 / stop** any agent from a mobile web page.
 
 One **self-hostable machin binary** — an HTTP hub + SQLite + a mobile web panel, no Python,
-no runtime. (Built in [machin](https://github.com/javimosch/machin), like roam itself.)
+no runtime. The panel is a **live reactive dashboard**: a WebAssembly client (compiled from
+the *same* machin view code as the server) polls the hub and re-renders in place, so parked
+agents appear without a full-page reload. Works with JS off too (server-rendered fallback).
+(Built in [machin](https://github.com/javimosch/machin), like roam itself.)
 
 ```
  remote box                       roam-panel (your server)                 your phone

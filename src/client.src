@@ -1,0 +1,19 @@
+// client.src — the wasm half. Compiled from the SAME view.src as the server, so the
+// live list is byte-identical to the SSR one. No state of its own: the host fetches
+// /api/state, hands the JSON to load(), and load() renders it through the shared
+// render_agents() and pushes the HTML to the page via the set_html DOM bridge.
+//
+//   machin encode src/view.src src/client.src > client.mfl
+//   machin build client.mfl --target wasm -o app.wasm
+
+extern "env" {
+    fn set_html(string)   // host: p => document.getElementById('agents').innerHTML = <string at p>
+}
+
+// host writes the /api/state JSON into this buffer, then calls load(ptr).
+export func buf(n) (p) { p = alloc(n + 1) }
+export func load(p) {
+    s := ptr_str(p)
+    free(p)
+    set_html(render_agents(s))
+}
