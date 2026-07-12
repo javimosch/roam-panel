@@ -63,12 +63,12 @@ Then point a roam agent at it (the agent needs outbound HTTPS to the hub):
 
 ```bash
 roam send --to my-vm --provider anthropic --confirm \
-  --hub https://panel.roam.intrane.fr --hub-token "$ROAM_HUB_TOKEN" \
+  --hub https://panel.example.com --hub-token "$ROAM_HUB_TOKEN" \
   --goal "clone repo X, run its tests, then git push a branch"
 ```
 
 The agent reports in, parks on `git push`, you get an email → tap **Approve** → it proceeds.
-Watch it live at `https://panel.roam.intrane.fr/`.
+Then open your hub (e.g. `https://panel.example.com`) and watch it there.
 
 ## CLI (agent-first)
 
