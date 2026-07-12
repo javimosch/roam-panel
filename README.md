@@ -31,6 +31,7 @@ agents appear without a full-page reload. Works with JS off too (server-rendered
   exact command shows up with Approve / Deny buttons, and you get an email with the same
   as one-tap signed links.
 - **Steer & stop** — send a steering note or stop any live agent.
+- **Dismiss** a finished agent to remove it immediately (or let it auto-prune after an hour).
 
 ### One limitation, stated plainly
 
@@ -118,16 +119,4 @@ Set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_BOT_NAME` (from @BotFather) on the hub; eac
 - **Worker auth:** a shared `ROAM_HUB_TOKEN` bearer, compared by SHA-256 hash.
 - **One-tap links:** HMAC-SHA256 over `job|decision|exp` with a 30-min expiry. Email
   security scanners follow GET links, so `/a` GET only renders a **POST confirmation** — the
-  state change happens on POST, which scanners don't submit.
-- **Panel browsing** (`GET /`, `POST /api/decide`) is gated by an in-app session cookie
-  (`PANEL_PASSWORD`), signed with `ROAM_PANEL_SECRET`. The worker endpoints (bearer) and
-  one-tap links (HMAC) stay public with their own auth, so no proxy basic-auth is needed
-  (which would otherwise break both).
-- Approve runs a destructive command — the worker still enforces its own `--max-denials`
-  budget as a backstop.
-- All secrets via env, never committed; TLS terminated at the proxy.
-
----
-
-*Part of the [roam](https://github.com/javimosch/roam) project. One self-hosted binary,
-built with [machin](https://github.com/javimosch/machin).*
+  state c…
