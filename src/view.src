@@ -85,6 +85,27 @@ func help_block(purl, parked) (h) {
     h = h + "</details>"
 }
 
+// settings_block: account + notifications (from the "account" object in /api/state).
+// Regenerate/disconnect are plain form POSTs (the host only intercepts /api/decide), so
+// they navigate normally; sign-out is a GET link.
+func settings_block(j) (h) {
+    email := jstr(j, ".account.email")
+    h = ""
+    if email == "" { return h }
+    tg := jint(j, ".account.tg")
+    tgurl := jstr(j, ".account.tg_url")
+    h = "<details class=help><summary>&#9881; Account &amp; notifications</summary>"
+    h = h + "<p>Signed in as <b>" + esc(email) + "</b> &middot; <a href=/logout>sign out</a></p>"
+    h = h + "<p>Worker token &mdash; <form method=post action=/account/regen style=\"display:inline\"><button class=ghost>Regenerate</button></form> (revealed once, pass it as <code>--hub-token</code>).</p>"
+    if tg == 1 {
+        h = h + "<p>Telegram: <b style=\"color:var(--grn)\">connected</b> &middot; <form method=post action=/account/tg-off style=\"display:inline\"><button class=ghost>disconnect</button></form></p>"
+    } else {
+        if tgurl != "" { h = h + "<p>Telegram: <a href=\"" + esc(tgurl) + "\">Connect Telegram</a> to get approval requests there too.</p>" }
+        if tgurl == "" { h = h + "<p style=\"color:var(--faint)\">Telegram: not configured on this hub.</p>" }
+    }
+    h = h + "</details>"
+}
+
 // the whole agent list from an /api/state payload {"parked":N,"panel_url":"…","agents":[...]}.
 // Begins with the live "N needs approval" banner + a collapsible how-to, then the cards.
 func render_agents(j) (h) {
@@ -104,4 +125,5 @@ func render_agents(j) (h) {
         }
     }
     if cnt == 0 { h = h + "<div class=empty>No agents yet &mdash; dispatch one (see <b>How to use this panel</b> above), or wait for one to report in.</div>" }
+    h = h + settings_block(j)
 }

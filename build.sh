@@ -15,7 +15,7 @@ mkdir -p build
 echo "built ./app.wasm ($(wc -c < app.wasm) bytes)"
 
 # 2. native binary: frameworks + shared view + server + CLI.
-"$MACHIN" encode src/machweb.src src/flags.src src/view.src src/server.src src/main.src > build/roam-panel.mfl
+"$MACHIN" encode src/machweb.src src/flags.src src/view.src src/accounts.src src/server.src src/main.src > build/roam-panel.mfl
 "$MACHIN" build build/roam-panel.mfl -o roam-panel
 echo "built ./roam-panel"
 echo "  cli:    ./roam-panel help-json"

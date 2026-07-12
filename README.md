@@ -92,6 +92,27 @@ self-describing catalog.
 | `POST /a` | HMAC-signed | apply the one-tap decision |
 | `GET /_health` | — | `{"ok":true,"service":"roam-panel"}` |
 
+## Accounts & multi-tenancy (M2)
+
+roam-panel is multi-tenant. Each account has its **own worker token** and sees **only its
+own agents**.
+
+- **Sign in / sign up** is passwordless: enter your email on the panel, get a magic-link,
+  click it. A first sign-in creates your account and reveals your worker token once (pass it
+  as `--hub-token`). Regenerate it any time under **Account & notifications**.
+- **Per-account tokens** (hashed at rest): the bearer token a `roam` worker sends maps to an
+  account; its agents, decisions, and notifications are scoped to that account.
+- **Backward-compat:** if `ROAM_HUB_TOKEN` is set it seeds a **default** account (email
+  `APPROVE_EMAIL`, Telegram `TELEGRAM_CHAT_ID`), and `PANEL_PASSWORD` logs into it — so an
+  existing single-user deploy keeps working while new users self-serve.
+
+## Telegram notifications (M2)
+
+Alongside email, park requests can arrive in **Telegram** with inline Approve/Deny buttons.
+Set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_BOT_NAME` (from @BotFather) on the hub; each user clicks
+**Connect Telegram** in the panel (a `t.me/<bot>?start=<code>` deep link) and a background
+`getUpdates` poller links their chat. No webhook needed.
+
 ## Security
 
 - **Worker auth:** a shared `ROAM_HUB_TOKEN` bearer, compared by SHA-256 hash.
