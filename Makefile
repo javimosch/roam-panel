@@ -13,8 +13,7 @@ build:
 # the daemon serves app.wasm from its working directory.
 release:
 	mkdir -p build
-	machin encode src/view.src src/client.src > build/client.mfl
-	machin build build/client.mfl --target wasm -o app.wasm
+	Z="$$(command -v zig || echo zig)"; W="$$(mktemp)"; printf '#!/bin/sh\nif [ "$$1" = cc ]; then exec %s "$$@" -D_WASI_EMULATED_MMAN -lwasi-emulated-mman; fi\nexec %s "$$@"\n' "$$Z" "$$Z" > "$$W"; chmod +x "$$W"; machin encode src/view.src src/client.src > build/client.mfl; ZIG="$$W" machin build build/client.mfl --target wasm -o app.wasm; rm -f "$$W"
 	machin encode $(SRCS) > build/roam-panel.mfl
 	machin build --static build/roam-panel.mfl -o roam-panel-x86_64-linux
 	sha256sum roam-panel-x86_64-linux app.wasm > roam-panel-x86_64-linux.sha256

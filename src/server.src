@@ -225,6 +225,24 @@ func h_decide(req) (res) {
     res = redirect("/")
 }
 
+// h_dismiss: remove a terminal agent (done/stopped/halted/error) owned by the session
+// account, plus its journal — a manual complement to the 1h auto-prune.
+func h_dismiss(req) (res) {
+    aid, ok := session_account(req)
+    if ok == 0 { return err_json("403 Forbidden", "sign in to the panel first") }
+    jobid := form(req, "job")
+    if jobid == "" { return err_json("400 Bad Request", "missing job") }
+    db := dbopen()
+    own := sqlite_query(db, "SELECT status FROM agents WHERE id = ? AND account_id = ?", []string{jobid, aid})
+    st := unq(jget(own, "[0].status"))
+    if st == "done" || st == "stopped" || st == "halted" || st == "error" {
+        sqlite_exec(db, "DELETE FROM events WHERE agent_id = ?", []string{jobid})
+        sqlite_exec(db, "DELETE FROM agents WHERE id = ? AND account_id = ?", []string{jobid, aid})
+    }
+    sqlite_close(db)
+    res = redirect("/")
+}
+
 // ---------- human-facing: signed one-tap link (from email) ----------
 // GET /a — verify signature, then render a POST confirmation (scanner-safe).
 func h_onetap_get(req) (res) {
@@ -408,6 +426,7 @@ func handle(req) (res) {
     if p == "/account/regen" && req.method == "POST" { return h_regen(req) }
     if p == "/account/tg-off" && req.method == "POST" { return h_tgoff(req) }
     if p == "/api/decide" && req.method == "POST" { return h_decide(req) }
+    if p == "/api/dismiss" && req.method == "POST" { return h_dismiss(req) }
     if p == "/a" && req.method == "POST" { return h_onetap_post(req) }
     if p == "/a" { return h_onetap_get(req) }
     if p == "/" {

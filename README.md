@@ -31,6 +31,7 @@ agents appear without a full-page reload. Works with JS off too (server-rendered
   exact command shows up with Approve / Deny buttons, and you get an email with the same
   as one-tap signed links.
 - **Steer & stop** — send a steering note or stop any live agent.
+- **Dismiss** a finished agent to remove it immediately (or let it auto-prune after an hour).
 
 ### One limitation, stated plainly
 
