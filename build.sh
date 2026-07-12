@@ -9,9 +9,18 @@ MACHIN="${MACHIN:-machin}"
 command -v "$MACHIN" >/dev/null 2>&1 || { echo "error: '$MACHIN' not found (set MACHIN=/path/to/machin)"; exit 1; }
 mkdir -p build
 
+# zig ≥0.16 (snap) split emulated mmap out of WASI libc, so the reactor wasm needs
+# -D_WASI_EMULATED_MMAN + -lwasi-emulated-mman. machin's --target wasm invokes `$ZIG cc`,
+# so wrap zig to add those flags for cc (only) — no effect on native or older zig.
+ZIGBIN="$(command -v zig || echo zig)"
+ZIGW="$(mktemp)"
+printf '#!/bin/sh\nif [ "$1" = cc ]; then exec %s "$@" -D_WASI_EMULATED_MMAN -lwasi-emulated-mman; fi\nexec %s "$@"\n' "$ZIGBIN" "$ZIGBIN" > "$ZIGW"
+chmod +x "$ZIGW"
+trap 'rm -f "$ZIGW"' EXIT
+
 # 1. wasm client: shared view + the client entry.
 "$MACHIN" encode src/view.src src/client.src > build/client.mfl
-"$MACHIN" build build/client.mfl --target wasm -o app.wasm
+ZIG="$ZIGW" "$MACHIN" build build/client.mfl --target wasm -o app.wasm
 echo "built ./app.wasm ($(wc -c < app.wasm) bytes)"
 
 # 2. native binary: frameworks + shared view + server + CLI.

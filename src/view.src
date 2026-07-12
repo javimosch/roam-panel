@@ -63,6 +63,9 @@ func render_card(j, i) (h) {
             k = k + 1
         }
     }
+    if status == "done" || status == "stopped" || status == "halted" || status == "error" {
+        h = h + "<div class=ctl><form method=post action=/api/dismiss><input type=hidden name=job value=\"" + esc(jobid) + "\"><button class=ghost>Dismiss</button></form></div>"
+    }
     if jr != "" {
         op := " open"
         if status == "awaiting" { op = "" }
