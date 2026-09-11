@@ -14,7 +14,7 @@ func portier_app_secret() (s) { s = env_or("PORTIER_APP_SECRET", "") }
 func portier_provider() (p) { p = env_or("PORTIER_PROVIDER", "") }
 func portier_enabled() (e) { e = 0  if portier_url() != "" && portier_app_id() != "" && portier_app_secret() != "" && portier_provider() != "" { e = 1 } }
 
-// ---- stateless CSRF state (ts|sig), 10-min window ----
+// ---- stateless CSRF state (ts.sig), 10-min window ----
 func portier_state_sign(ts) (t) { t = hmac_sha256(sign_secret(), "portier|" + ts) }
 func portier_state_verify(ts, sig) (ok) {
     ok = 0
@@ -28,7 +28,7 @@ func portier_state_verify(ts, sig) (ok) {
 func h_portier_login(req) (res) {
     if portier_enabled() == 0 { return redirect("/") }
     ts := str(now())
-    state := ts + "|" + portier_state_sign(ts)
+    state := ts + "." + portier_state_sign(ts)
     u := portier_url() + "/auth/" + portier_app_id() + "/" + portier_provider() + "?redirect_uri=" + url_encode(panel_url() + "/auth/portier") + "&state=" + url_encode(state)
     res = redirect(u)
 }
@@ -39,7 +39,7 @@ func h_portier_callback(req) (res) {
     code := query(req, "code")
     state := query(req, "state")
     if code == "" || state == "" { return response("403 Forbidden", "text/html; charset=utf-8", login_page("missing code or state", 0)) }
-    bar := index(state, "|")
+    bar := index(state, ".")
     if bar < 1 { return response("403 Forbidden", "text/html; charset=utf-8", login_page("invalid state", 0)) }
     ts := substr(state, 0, bar)
     sig := substr(state, bar + 1, len(state))
