@@ -71,6 +71,9 @@ func login_page(errmsg, sent) (h) {
     if panel_pass() != "" {
         h = h + "<form method=post action=/login class=ag><div class=ask>or admin password</div><div class=ctl><input type=password name=password placeholder=password><button class=ghost>Sign in</button></div></form>"
     }
+    if portier_enabled() == 1 {
+        h = h + "<a href=/login/portier class=ag style=\"text-decoration:none;display:block\"><div class=ask>or one-click SSO</div><div class=ctl><button class=ghost style=\"width:100%\">Login with portier &rarr;</button></div></a>"
+    }
     h = h + "</body></html>"
 }
 func h_login(req) (res) {
@@ -422,6 +425,8 @@ func handle(req) (res) {
     }
     if p == "/login" && req.method == "POST" { return h_login(req) }
     if p == "/auth" { return h_auth(req) }
+    if p == "/login/portier" { return h_portier_login(req) }
+    if p == "/auth/portier" { return h_portier_callback(req) }
     if p == "/logout" { return h_logout(req) }
     if p == "/account/regen" && req.method == "POST" { return h_regen(req) }
     if p == "/account/tg-off" && req.method == "POST" { return h_tgoff(req) }

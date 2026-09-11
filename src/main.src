@@ -13,7 +13,7 @@ func print_help_json() {
         "{\"name\":\"list\",\"args\":\"\",\"desc\":\"agents as JSON (id, host, status, pending, iters)\"}," +
         "{\"name\":\"token\",\"args\":\"[--gen]\",\"desc\":\"print the configured worker token, or --gen a fresh one to set as ROAM_HUB_TOKEN\"}" +
         "]," +
-        "\"env\":[\"ROAM_HUB_TOKEN (worker bearer token)\",\"ROAM_PANEL_SECRET (one-tap link HMAC key)\",\"PANEL_URL\",\"RESEND_API_KEY\",\"RESEND_FROM\",\"APPROVE_EMAIL\",\"ROAM_PANEL_DB (default roam-panel.db)\"]," +
+        "\"env\":[\"ROAM_HUB_TOKEN (worker bearer token)\",\"ROAM_PANEL_SECRET (one-tap link HMAC key)\",\"PANEL_URL\",\"RESEND_API_KEY\",\"RESEND_FROM\",\"APPROVE_EMAIL\",\"ROAM_PANEL_DB (default roam-panel.db)\",\"PORTIER_URL+PORTIER_APP_ID+PORTIER_APP_SECRET+PORTIER_PROVIDER (opt-in SSO, all four or none)\"]," +
         "\"exit_codes\":\"0 ok | 80-89 input | 100-109 integration | 110-119 internal\"}")
 }
 

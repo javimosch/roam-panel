@@ -1,0 +1,66 @@
+// portier.src — opt-in SSO via portier (https://portier.intrane.fr).
+// Disabled by default: all four PORTIER_* env vars must be set, else the login
+// page shows only email magic-link + password. When enabled, a "Login with portier"
+// button starts a stateless OAuth flow — portier brokers the IdP dance and hands
+// back a verified email, which feeds into the same account_for_email/mint_token/
+// set_session pipeline as the magic-link flow. Reuses server.src config helpers
+// (env_or/sign_secret/panel_url) + accounts.src (account_exists/account_for_email/
+// mint_token) + view.src helpers (unq/jget/esc).
+
+// ---- config (opt-in: all four or none) ----
+func portier_url() (u) { u = env_or("PORTIER_URL", "") }
+func portier_app_id() (s) { s = env_or("PORTIER_APP_ID", "") }
+func portier_app_secret() (s) { s = env_or("PORTIER_APP_SECRET", "") }
+func portier_provider() (p) { p = env_or("PORTIER_PROVIDER", "") }
+func portier_enabled() (e) { e = 0  if portier_url() != "" && portier_app_id() != "" && portier_app_secret() != "" && portier_provider() != "" { e = 1 } }
+
+// ---- stateless CSRF state (ts|sig), 10-min window ----
+func portier_state_sign(ts) (t) { t = hmac_sha256(sign_secret(), "portier|" + ts) }
+func portier_state_verify(ts, sig) (ok) {
+    ok = 0
+    if sign_secret() == "" || ts == "" || sig == "" { return ok }
+    if portier_state_sign(ts) != sig { return ok }
+    if now() >= parse_int(ts) + 600 { return ok }
+    ok = 1
+}
+
+// GET /login/portier — redirect the browser to portier to start the OAuth flow.
+func h_portier_login(req) (res) {
+    if portier_enabled() == 0 { return redirect("/") }
+    ts := str(now())
+    state := ts + "|" + portier_state_sign(ts)
+    u := portier_url() + "/auth/" + portier_app_id() + "/" + portier_provider() + "?redirect_uri=" + url_encode(panel_url() + "/auth/portier") + "&state=" + url_encode(state)
+    res = redirect(u)
+}
+
+// GET /auth/portier — portier redirects back here with ?code=&state=; exchange for identity.
+func h_portier_callback(req) (res) {
+    if portier_enabled() == 0 { return redirect("/") }
+    code := query(req, "code")
+    state := query(req, "state")
+    if code == "" || state == "" { return response("403 Forbidden", "text/html; charset=utf-8", login_page("missing code or state", 0)) }
+    bar := index(state, "|")
+    if bar < 1 { return response("403 Forbidden", "text/html; charset=utf-8", login_page("invalid state", 0)) }
+    ts := substr(state, 0, bar)
+    sig := substr(state, bar + 1, len(state))
+    if portier_state_verify(ts, sig) == 0 { return response("403 Forbidden", "text/html; charset=utf-8", login_page("invalid or expired login state", 0)) }
+    body := "{\"code\":" + json(code) + "}"
+    st, resp, _ := http_request("POST", portier_url() + "/v1/token", []string{"Authorization: Bearer " + portier_app_secret(), "Content-Type: application/json"}, body)
+    if st != 200 { return response("403 Forbidden", "text/html; charset=utf-8", login_page("portier token exchange failed", 0)) }
+    email := unq(jget(resp, ".identity.email"))
+    if email == "" { return response("403 Forbidden", "text/html; charset=utf-8", login_page("no email in portier identity", 0)) }
+    db := dbopen()
+    isnew := 0
+    if account_exists(db, email) == 0 { isnew = 1 }
+    aid := account_for_email(db, email)
+    tok := ""
+    if isnew == 1 { tok = mint_token(db, aid) }
+    sqlite_close(db)
+    if isnew == 1 {
+        res = response("200 OK", "text/html; charset=utf-8", welcome_page(email, tok))
+        res = set_session(res, sign_secret(), "acct", aid)
+        return res
+    }
+    res = redirect("/")
+    res = set_session(res, sign_secret(), "acct", aid)
+}
