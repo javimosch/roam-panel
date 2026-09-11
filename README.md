@@ -99,10 +99,12 @@ roam-panel is multi-tenant. Each account has its **own worker token** and sees *
 own agents**.
 
 - **Sign in / sign up** is passwordless: enter your email on the panel, get a magic-link,
-  click it. A first sign-in creates your account and reveals your worker token once (pass it
-  as `--hub-token`). Regenerate it any time under **Account & notifications**.
-- **Per-account tokens** (hashed at rest): the bearer token a `roam` worker sends maps to an
-  account; its agents, decisions, and notifications are scoped to that account.
+  click it. A first sign-in creates your account and reveals your worker token (pass it
+  as `--hub-token`). **Reveal** or **Regenerate** it any time under **Account & notifications**.
+- **Per-account tokens** (hashed at rest, encrypted for reveal): the bearer token a `roam`
+  worker sends maps to an account; its agents, decisions, and notifications are scoped to
+  that account. Tokens are stored as SHA-256 hashes for auth, plus AES-256-GCM encrypted
+  copies for on-demand reveal.
 - **Backward-compat:** if `ROAM_HUB_TOKEN` is set it seeds a **default** account (email
   `APPROVE_EMAIL`, Telegram `TELEGRAM_CHAT_ID`), and `PANEL_PASSWORD` logs into it — so an
   existing single-user deploy keeps working while new users self-serve.
@@ -113,6 +115,26 @@ Alongside email, park requests can arrive in **Telegram** with inline Approve/De
 Set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_BOT_NAME` (from @BotFather) on the hub; each user clicks
 **Connect Telegram** in the panel (a `t.me/<bot>?start=<code>` deep link) and a background
 `getUpdates` poller links their chat. No webhook needed.
+
+## Portier SSO (optional)
+
+roam-panel supports optional SSO via [Portier](https://github.com/javimosch/portier),
+an OAuth/OIDC broker. When enabled, users get a "Login with portier" button for
+one-click login through GitHub, Google, or any OIDC provider — instead of the
+email magic-link flow.
+
+SSO is **opt-in and disabled by default**. Set these env vars to enable:
+
+```
+PORTIER_URL=https://your-portier.example.com
+PORTIER_APP_ID=app_xxxxxxxxxxxx
+PORTIER_APP_SECRET=psk_xxxxxxxxxxxxxxxxxxxxxxxx
+PORTIER_PROVIDER=github   # or google, intrane, your custom OIDC name
+```
+
+Portier also supports a **per-app email allowlist** — restrict who can log in
+by exact email or domain pattern (`@yourcompany.com`). See
+[docs/sso.md](docs/sso.md) for the full setup guide.
 
 ## Security
 
