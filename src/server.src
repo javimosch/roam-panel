@@ -423,6 +423,15 @@ func handle(req) (res) {
     qi := index(p, "?")
     if qi >= 0 { p = substr(p, 0, qi) }
     if p == "/_health" { return ok_json("{\"ok\":true,\"service\":\"roam-panel\"}") }
+    if p == "/_shutdown" && req.method == "POST" {
+        tok := header(req, "X-Shutdown-Token")
+        expected := env_or("ROAM_PANEL_SECRET", "")
+        if expected == "" { return err_json("403 Forbidden", "shutdown token not configured") }
+        if tok != expected { return err_json("403 Forbidden", "invalid shutdown token") }
+        res = ok_json("{\"ok\":true,\"shutting_down\":true}")
+        go shutdown_delayed()
+        return res
+    }
     if p == "/v1/report" && req.method == "POST" { return h_report(req) }
     if p == "/v1/decision" { return h_decision(req) }
     if p == "/app.wasm" { return ok_wasm(read_file_bytes("app.wasm")) }
@@ -461,4 +470,10 @@ func serve_app(port) {
     go tg_poller()
     println("{\"ok\":true,\"service\":\"roam-panel\",\"port\":" + str(port) + ",\"db\":" + json(dbpath()) + "}")
     serve(port, func(req) { return handle(req) })
+}
+
+// shutdown_delayed exits after a brief delay so the response can flush.
+func shutdown_delayed() {
+    sleep(200)
+    exit(0)
 }
