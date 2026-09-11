@@ -99,7 +99,7 @@ func settings_block(j) (h) {
     tgurl := jstr(j, ".account.tg_url")
     h = "<details class=help><summary>&#9881; Account &amp; notifications</summary>"
     h = h + "<p>Signed in as <b>" + esc(email) + "</b> &middot; <a href=/logout>sign out</a></p>"
-    h = h + "<p>Worker token &mdash; <form method=post action=/account/regen style=\"display:inline\"><button class=ghost>Regenerate</button></form> (revealed once, pass it as <code>--hub-token</code>).</p>"
+    h = h + "<p>Worker token &mdash; <form method=post action=/account/reveal style=\"display:inline\"><button class=ghost>Reveal</button></form> <form method=post action=/account/regen style=\"display:inline\"><button class=ghost>Regenerate</button></form> (pass it as <code>--hub-token</code>).</p>"
     if tg == 1 {
         h = h + "<p>Telegram: <b style=\"color:var(--grn)\">connected</b> &middot; <form method=post action=/account/tg-off style=\"display:inline\"><button class=ghost>disconnect</button></form></p>"
     } else {

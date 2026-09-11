@@ -12,13 +12,46 @@ func has_column(db, tbl, col) (found) {
 }
 func accounts_schema(db) {
     sqlite_exec(db, "CREATE TABLE IF NOT EXISTS accounts(id TEXT PRIMARY KEY, email TEXT UNIQUE, telegram_chat_id TEXT DEFAULT '', tg_code TEXT DEFAULT '', created INTEGER)", []string{})
-    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS tokens(token TEXT PRIMARY KEY, account_id TEXT, created INTEGER)", []string{})
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS tokens(token TEXT PRIMARY KEY, account_id TEXT, token_enc TEXT DEFAULT '', created INTEGER)", []string{})
     if has_column(db, "agents", "account_id") == 0 {
         sqlite_exec(db, "ALTER TABLE agents ADD COLUMN account_id TEXT DEFAULT ''", []string{})
     }
 }
 func tok_hash(t) (h) { h = sha256(t) }
 func newid() (s) { s = to_hex(rand_bytes(16)) }
+
+// ---- token encryption at rest (AES-256-GCM, key from ROAM_PANEL_SECRET) ----
+// Stored form: "enc:" + hex(nonce) + ":" + hex(ciphertext+tag). Plaintext
+// tolerated on read (pre-encryption rows). If no secret, store plaintext (dev).
+func enc_key() (k, ok) {
+    ok = 0
+    s := sign_secret()
+    if s == "" { return }
+    k = sha256_bytes(bytes(s))
+    ok = 1
+}
+func token_encrypt(tok) (stored) {
+    stored = tok
+    if tok == "" { return }
+    k, ok := enc_key()
+    if ok == 0 { return }
+    nonce := rand_bytes(12)
+    ct := aes_gcm_encrypt(k, nonce, bytes(tok), bytes(""))
+    stored = "enc:" + to_hex(nonce) + ":" + to_hex(ct)
+}
+func token_decrypt(stored) (tok) {
+    tok = stored
+    if has_prefix(stored, "enc:") == false { return }
+    k, ok := enc_key()
+    if ok == 0 { tok = ""  return }
+    rest := substr(stored, 4, len(stored))
+    ci := index(rest, ":")
+    if ci <= 0 { tok = ""  return }
+    nonce := from_hex(substr(rest, 0, ci))
+    ct := from_hex(substr(rest, ci + 1, len(rest)))
+    pt := aes_gcm_decrypt(k, nonce, ct, bytes(""))
+    tok = bytes_str(pt)
+}
 
 // seed a "default" account from env ROAM_HUB_TOKEN so existing single-user deploys keep
 // working (that token now belongs to the default account; pre-M2 agents are adopted into it).
@@ -28,7 +61,7 @@ func seed_default(db) {
     have := sqlite_query(db, "SELECT account_id FROM tokens WHERE token = ?", []string{tok_hash(ht)})
     if have != "[]" { return }
     sqlite_exec(db, "INSERT OR IGNORE INTO accounts(id,email,telegram_chat_id,tg_code,created) VALUES('default',?,?,?,?)", []string{approve_email(), env_or("TELEGRAM_CHAT_ID", ""), newid(), str(now())})
-    sqlite_exec(db, "INSERT OR IGNORE INTO tokens(token,account_id,created) VALUES(?,'default',?)", []string{tok_hash(ht), str(now())})
+    sqlite_exec(db, "INSERT OR IGNORE INTO tokens(token,account_id,token_enc,created) VALUES(?,?,?,?)", []string{tok_hash(ht), "default", token_encrypt(ht), str(now())})
     sqlite_exec(db, "UPDATE agents SET account_id='default' WHERE account_id='' OR account_id IS NULL", []string{})
 }
 
@@ -60,7 +93,14 @@ func account_for_email(db, email) (aid) {
 func mint_token(db, aid) (tok) {
     tok = newid() + newid()
     sqlite_exec(db, "DELETE FROM tokens WHERE account_id = ?", []string{aid})
-    sqlite_exec(db, "INSERT INTO tokens(token,account_id,created) VALUES(?,?,?)", []string{tok_hash(tok), aid, str(now())})
+    sqlite_exec(db, "INSERT INTO tokens(token,account_id,token_enc,created) VALUES(?,?,?,?)", []string{tok_hash(tok), aid, token_encrypt(tok), str(now())})
+}
+func reveal_token(db, aid) (tok) {
+    tok = ""
+    rows := sqlite_query(db, "SELECT token_enc FROM tokens WHERE account_id = ?", []string{aid})
+    enc := unq(jget(rows, "[0].token_enc"))
+    if enc == "" { return }
+    tok = token_decrypt(enc)
 }
 func account_email(db, aid) (e) { rows := sqlite_query(db, "SELECT email FROM accounts WHERE id = ?", []string{aid})  e = unq(jget(rows, "[0].email")) }
 func account_tg(db, aid) (c)    { rows := sqlite_query(db, "SELECT telegram_chat_id FROM accounts WHERE id = ?", []string{aid})  c = unq(jget(rows, "[0].telegram_chat_id")) }

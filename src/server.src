@@ -94,8 +94,8 @@ func h_login(req) (res) {
 func welcome_page(email, tok) (h) {
     h = "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>roam panel</title>" + styles() + "</head><body>"
     h = h + "<header><h1>&#128752; roam panel</h1></header><div class=sub>signed in as " + esc(email) + "</div>"
-    h = h + "<div class=\"ag park\"><div class=ask>&#9888;&#65039; your worker token &mdash; save it, shown once</div><div class=cmd>" + esc(tok) + "</div>"
-    h = h + "<p style=\"color:var(--mut);font-size:12.5px;margin:10px 0 0\">Pass it as <code>--hub-token</code> when you dispatch agents. Regenerate any time from Account &amp; notifications.</p></div>"
+    h = h + "<div class=\"ag park\"><div class=ask>&#9888;&#65039; your worker token</div><div class=cmd>" + esc(tok) + "</div>"
+    h = h + "<p style=\"color:var(--mut);font-size:12.5px;margin:10px 0 0\">Pass it as <code>--hub-token</code> when you dispatch agents. You can reveal or regenerate it any time from Account &amp; notifications.</p></div>"
     h = h + "<p><a href=/>Open the panel &rarr;</a></p></body></html>"
 }
 func h_auth(req) (res) {
@@ -124,6 +124,16 @@ func h_regen(req) (res) {
     tok := mint_token(db, aid)
     email := account_email(db, aid)
     sqlite_close(db)
+    res = response("200 OK", "text/html; charset=utf-8", welcome_page(email, tok))
+}
+func h_reveal(req) (res) {
+    aid, ok := session_account(req)
+    if ok == 0 { return redirect("/") }
+    db := dbopen()
+    tok := reveal_token(db, aid)
+    email := account_email(db, aid)
+    sqlite_close(db)
+    if tok == "" { return redirect("/") }
     res = response("200 OK", "text/html; charset=utf-8", welcome_page(email, tok))
 }
 func h_tgoff(req) (res) {
@@ -430,6 +440,7 @@ func handle(req) (res) {
     if p == "/auth/portier" { return h_portier_callback(req) }
     if p == "/logout" { return h_logout(req) }
     if p == "/account/regen" && req.method == "POST" { return h_regen(req) }
+    if p == "/account/reveal" && req.method == "POST" { return h_reveal(req) }
     if p == "/account/tg-off" && req.method == "POST" { return h_tgoff(req) }
     if p == "/api/decide" && req.method == "POST" { return h_decide(req) }
     if p == "/api/dismiss" && req.method == "POST" { return h_dismiss(req) }
